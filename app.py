@@ -124,8 +124,10 @@ NAN          = float("nan")
 SAVE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "turtle_save.json")
 MASTER_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_save.pkl")
 FILTER_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filter_save.json")
-FUNDA_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fundamental_list.csv")
-MEMO_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memo_save.json")
+FUNDA_FILE        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fundamental_list.csv")
+MEMO_FILE         = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memo_save.json")
+EDINETDB_API_KEY  = "edb_473632966cd7b89fda850fde6baa05f6"
+EDINETDB_MCP_URL  = "https://edinetdb.jp/mcp"
 
 # フィルター設定の保存対象キー（session_state のキーと対応）
 _FILTER_KEYS = [
@@ -1621,6 +1623,98 @@ def get_fundamentals(code: str) -> dict:
         return {"code": code, "error": str(e)}
 
 
+# ===========================================================================
+# EdinetDB MCP ヘルパー
+# ===========================================================================
+
+def _call_edinetdb(tool_name: str, **kwargs) -> dict:
+    """EdinetDB MCP サーバーにツール呼び出しを送信し、結果を dict で返す。"""
+    try:
+        resp = _req.post(
+            EDINETDB_MCP_URL,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {EDINETDB_API_KEY}",
+            },
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {"name": tool_name, "arguments": kwargs},
+            },
+            timeout=20,
+        )
+        text = resp.json()["result"]["content"][0]["text"]
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {"error": text}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)   # 1日キャッシュ
+def edinet_get_edinet_code(sec_code: str) -> str | None:
+    """証券コード(4桁) → EdinetCode を検索して返す。見つからなければ None。"""
+    result = _call_edinetdb("search_companies", query=sec_code)
+    companies = result.get("companies", [])
+    if not companies:
+        return None
+    # secCode は "72030" のように末尾0付きで返るので前方一致で照合
+    for c in companies:
+        if str(c.get("secCode", "")).startswith(sec_code):
+            return c["edinetCode"]
+    return companies[0]["edinetCode"]
+
+
+@st.cache_data(ttl=3600, show_spinner=False)    # 1時間キャッシュ
+def edinet_get_company(sec_code: str) -> dict:
+    """証券コード(4桁) → EdinetDB get_company の結果を返す。"""
+    edinet_code = edinet_get_edinet_code(sec_code)
+    if not edinet_code:
+        return {"error": f"EDINETコードが見つかりません: {sec_code}"}
+    return _call_edinetdb("get_company", edinet_code=edinet_code)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def edinet_get_shareholders(sec_code: str) -> dict:
+    """証券コード(4桁) → EdinetDB get_shareholders の結果を返す。"""
+    edinet_code = edinet_get_edinet_code(sec_code)
+    if not edinet_code:
+        return {"error": f"EDINETコードが見つかりません: {sec_code}"}
+    return _call_edinetdb("get_shareholders", edinet_code=edinet_code)
+
+
+def _fmt_oku(value) -> str:
+    """円単位の数値を億円表示にフォーマット。"""
+    try:
+        v = float(value)
+        return f"{v / 1e8:,.0f} 億円"
+    except Exception:
+        return "—"
+
+
+def _health_badge(score) -> str:
+    """健全性スコアを色付きバッジ HTML で返す。"""
+    try:
+        s = int(score)
+    except Exception:
+        return "—"
+    if s >= 75:
+        color, label = "#4caf50", "優良"
+    elif s >= 50:
+        color, label = "#ff9800", "良好"
+    elif s >= 25:
+        color, label = "#f44336", "注意"
+    else:
+        color, label = "#9e9e9e", "要検討"
+    bar = "█" * (s // 10) + "░" * (10 - s // 10)
+    return (
+        f'<span style="color:{color};font-weight:bold">{s}/100</span> '
+        f'<span style="color:{color};font-size:0.75em">{bar} {label}</span>'
+    )
+
+
 def save_funda_data(df: pd.DataFrame) -> None:
     """ファンダデータを CSV に保存する"""
     df.to_csv(FUNDA_FILE, index=False, encoding="utf-8-sig")
@@ -1767,8 +1861,8 @@ def render_funda_tab() -> None:
 
     # ── テーブルヘッダー ─────────────────────────────────────────────────
     _FUNDA_LABELS = ["コード", "銘柄名", "現在価格", "前日比(%)",
-                     "かぶたん", "理論株価", "チャート", "メモ", "削除"]
-    _FUNDA_WIDTHS = [0.8, 1.8, 1.0, 0.9, 0.8, 0.8, 0.7, 0.6, 0.6]
+                     "かぶたん", "理論株価", "チャート", "📊EDB", "メモ", "削除"]
+    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.6, 0.6, 0.6]
     _hdr_cs = st.columns(_FUNDA_WIDTHS)
     for _hc, _lbl in zip(_hdr_cs, _FUNDA_LABELS):
         _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
@@ -1811,14 +1905,20 @@ def render_funda_tab() -> None:
         with _rc[6]:
             st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_ticker_clean}")
 
-        # メモ開閉ボタン
+        # EdinetDB 分析ボタン
         with _rc[7]:
+            _edb_key = f"edb_open_{_code_raw}"
+            if st.button("📊", key=f"edb_btn_{_code_raw}"):
+                st.session_state[_edb_key] = not st.session_state.get(_edb_key, False)
+
+        # メモ開閉ボタン
+        with _rc[8]:
             _memo_key = f"memo_open_{_code_raw}"
             if st.button("📝", key=f"memo_btn_{_code_raw}"):
                 st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
 
         # 削除ボタン
-        with _rc[8]:
+        with _rc[9]:
             if st.button("🗑️", key=f"del_funda_{_code_raw}"):
                 st.session_state.fund_df = st.session_state.fund_df[
                     st.session_state.fund_df["code"] != _code_raw
@@ -1831,7 +1931,112 @@ def render_funda_tab() -> None:
                     save_memo_data(st.session_state.funda_memos)
                 st.rerun()
 
-        # メモ展開エリア（📝ボタンで開閉）
+        # ── EdinetDB 詳細パネル ──────────────────────────────────────────────
+        if st.session_state.get(f"edb_open_{_code_raw}", False):
+            with st.container(border=True):
+                st.markdown(f"#### 📊 EdinetDB分析　{_jp_name}（{_ticker_clean}）")
+                with st.spinner("EdinetDBからデータ取得中..."):
+                    _edb = edinet_get_company(_ticker_clean)
+                    _edb_sh = edinet_get_shareholders(_ticker_clean)
+
+                if "error" in _edb:
+                    st.warning(f"データ取得エラー: {_edb['error']}")
+                else:
+                    # ── 財務健全性スコア ──
+                    _score = _edb.get("healthScore")
+                    st.markdown("**財務健全性スコア**")
+                    st.markdown(_health_badge(_score), unsafe_allow_html=True)
+                    st.markdown("")
+
+                    # ── 最新財務ハイライト ──
+                    _fy    = _edb.get("latestFiscalYear", "—")
+                    _rev   = _edb.get("revenue")
+                    _oi    = _edb.get("operatingIncome")
+                    _ni    = _edb.get("netIncome")
+                    _roe   = _edb.get("roe")
+                    _opm   = _edb.get("operatingMargin")
+                    _per   = _edb.get("per")
+                    _pbr_v = _edb.get("priceToBook") or _edb.get("pbr")
+                    _dy    = _edb.get("dividendYield")
+                    _eq    = _edb.get("equityRatio")
+                    _eps   = _edb.get("eps")
+
+                    st.markdown(f"**最新財務ハイライト（FY{_fy}）**")
+                    _fc1, _fc2, _fc3 = st.columns(3)
+                    _fc1.metric("売上高",   _fmt_oku(_rev))
+                    _fc2.metric("営業利益", _fmt_oku(_oi))
+                    _fc3.metric("純利益",   _fmt_oku(_ni))
+
+                    _fr1, _fr2, _fr3, _fr4, _fr5 = st.columns(5)
+                    _fr1.metric("ROE",      f"{_roe*100:.1f}%" if _roe else "—")
+                    _fr2.metric("営業利益率", f"{_opm*100:.1f}%" if _opm else "—")
+                    _fr3.metric("PER",      f"{_per:.1f}倍"   if _per else "—")
+                    _fr4.metric("自己資本比率", f"{_eq*100:.1f}%" if _eq else "—")
+                    _fr5.metric("配当利回り", f"{_dy*100:.2f}%" if _dy else "—")
+
+                    # ── 直近決算（TDNet） ──
+                    _le = _edb.get("latestEarnings")
+                    if _le:
+                        st.markdown("---")
+                        _qtitle = _le.get("title", "直近決算")
+                        _qdate  = _le.get("disclosureDate", "")
+                        st.markdown(f"**直近決算** ({_qdate})　{_qtitle}")
+                        _qc1, _qc2, _qc3, _qc4 = st.columns(4)
+                        _qrev = _le.get("revenue")
+                        _qoi  = _le.get("operatingIncome")
+                        _qni  = _le.get("netIncome")
+                        _qeps = _le.get("eps")
+                        _rc_chg = _le.get("revenueChange")
+                        _oi_chg = _le.get("operatingIncomeChange")
+                        _ni_chg = _le.get("netIncomeChange")
+
+                        def _chg(v):
+                            if v is None: return ""
+                            return f"{v:+.1f}%"
+
+                        _qc1.metric("売上高(百万円)",   f"{_qrev:,.0f}" if _qrev else "—", _chg(_rc_chg))
+                        _qc2.metric("営業利益(百万円)", f"{_qoi:,.0f}"  if _qoi  else "—", _chg(_oi_chg))
+                        _qc3.metric("純利益(百万円)",   f"{_qni:,.0f}"  if _qni  else "—", _chg(_ni_chg))
+                        _qc4.metric("EPS(円)",         f"{_qeps:.2f}"  if _qeps else "—")
+
+                        # 通期予想進捗
+                        _frev = _le.get("forecastRevenue")
+                        _foi  = _le.get("forecastOperatingIncome")
+                        if _frev and _qrev:
+                            _prog = _qrev / _frev * 100
+                            st.progress(min(int(_prog), 100),
+                                        text=f"通期予想進捗 売上: {_prog:.1f}%")
+
+                        # PDFリンク
+                        _pdf = _le.get("pdfUrl")
+                        if _pdf:
+                            st.markdown(f"[📄 決算短信PDF]({_pdf})", unsafe_allow_html=False)
+
+                # ── 大株主 ──
+                if "error" not in _edb_sh:
+                    _filings = _edb_sh.get("filings", [])
+                    if _filings:
+                        st.markdown("---")
+                        st.markdown("**大量保有報告（直近）**")
+                        _sh_rows = []
+                        for _fi in _filings[:5]:
+                            _sh_rows.append({
+                                "提出日":     _fi.get("submit_date", ""),
+                                "株主名":     _fi.get("filer_name", ""),
+                                "保有比率":   f"{_fi.get('total_holding_ratio', 0)*100:.2f}%",
+                                "書類種別":   _fi.get("doc_type", ""),
+                            })
+                        st.dataframe(pd.DataFrame(_sh_rows), use_container_width=True, hide_index=True)
+
+                # EDINET リンク
+                _edinet_code = edinet_get_edinet_code(_ticker_clean)
+                if _edinet_code:
+                    st.markdown(
+                        f"[🔗 EDINET有報ページ](https://edinetdb.jp/company/{_edinet_code})",
+                        unsafe_allow_html=False,
+                    )
+
+        # ── メモ展開エリア ──────────────────────────────────────────────────
         if st.session_state.get(f"memo_open_{_code_raw}", False):
             _current_memo = st.session_state.funda_memos.get(_code_raw, "")
             _new_memo = st.text_area(
