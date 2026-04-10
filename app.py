@@ -3289,6 +3289,143 @@ def _parse_csv_tickers(uploaded_file) -> tuple[list[str], str | None]:
 
 
 # ===========================================================================
+# 画面描画: 決算レポートタブ
+# ===========================================================================
+
+_REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+_LOGS_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+
+
+def _list_reports() -> list[str]:
+    """reports/ 内の YYYY-MM-DD.md を新しい順に返す。"""
+    if not os.path.isdir(_REPORTS_DIR):
+        return []
+    files = [f for f in os.listdir(_REPORTS_DIR) if f.endswith(".md")]
+    files.sort(reverse=True)
+    return files
+
+
+def _load_report(filename: str) -> str:
+    """reports/{filename} の内容を返す。"""
+    try:
+        with open(os.path.join(_REPORTS_DIR, filename), encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def render_earnings_report_tab() -> None:
+    st.title("📰 決算レポート")
+    st.caption(
+        "毎日の決算発表をまとめた自動生成レポートを表示します。"
+        "　レポートは `daily_earnings_report.bat` を実行すると `reports/` フォルダに保存されます。"
+    )
+
+    # ── 自動生成スクリプトの実行案内 ─────────────────────────────────────
+    with st.expander("🚀 レポートの自動生成方法", expanded=False):
+        st.markdown("""
+**手動実行（今すぐ生成）**
+```
+daily_earnings_report.bat
+```
+または PowerShell から：
+```powershell
+powershell -ExecutionPolicy Bypass -File daily_earnings_report.ps1
+```
+特定日付を指定する場合：
+```powershell
+powershell -ExecutionPolicy Bypass -File daily_earnings_report.ps1 -Date 2026-04-10
+```
+
+**タスクスケジューラで毎日自動実行**（毎日20:00に実行する例）：
+```powershell
+$action  = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Users\\トシヒロ\\Desktop\\turtle_tool\\daily_earnings_report.ps1"
+$trigger = New-ScheduledTaskTrigger -Daily -At "20:00"
+Register-ScheduledTask -TaskName "TurtleTool_DailyEarnings" -Action $action -Trigger $trigger -RunLevel Highest
+```
+        """)
+
+    st.divider()
+
+    # ── レポート一覧 ─────────────────────────────────────────────────────
+    report_files = _list_reports()
+
+    _rc1, _rc2, _rc3 = st.columns([0.5, 0.25, 0.25])
+    with _rc1:
+        if report_files:
+            sel_report = st.selectbox(
+                "📅 レポートを選択",
+                options=report_files,
+                format_func=lambda f: f.replace(".md", ""),
+                key="er_report_select",
+            )
+        else:
+            st.info(
+                "`reports/` フォルダにレポートがありません。"
+                "　`daily_earnings_report.bat` を実行して生成してください。"
+            )
+            sel_report = None
+    with _rc2:
+        if st.button("🔄 一覧を更新", key="er_refresh", use_container_width=True):
+            st.rerun()
+    with _rc3:
+        # 今日分を今すぐ生成するショートカット（PowerShell を呼び出す）
+        if st.button("⚡ 今日分を生成", key="er_run_today", use_container_width=True,
+                     help="daily_earnings_report.ps1 を実行して今日分を生成します"):
+            ps1_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "daily_earnings_report.ps1")
+            import subprocess, datetime as _dt
+            today = _dt.date.today().strftime("%Y-%m-%d")
+            try:
+                _proc = subprocess.Popen(
+                    ["powershell", "-ExecutionPolicy", "Bypass",
+                     "-File", ps1_path, "-Date", today],
+                    cwd=os.path.dirname(os.path.abspath(__file__)),
+                )
+                st.success(
+                    f"レポート生成を開始しました（PID {_proc.pid}）。"
+                    "完了後に「🔄 一覧を更新」を押してください。"
+                )
+            except Exception as _e:
+                st.error(f"実行エラー: {_e}")
+
+    # ── レポート表示 ─────────────────────────────────────────────────────
+    if sel_report:
+        report_text = _load_report(sel_report)
+        if report_text:
+            # ヘッダー行（ダウンロードボタン）
+            _rh1, _rh2 = st.columns([0.8, 0.2])
+            with _rh1:
+                # レポートの1行目をタイトルとして表示
+                first_line = report_text.split("\n")[0].lstrip("#").strip()
+                st.markdown(f"**{first_line}**")
+            with _rh2:
+                st.download_button(
+                    "📥 MDダウンロード",
+                    data=report_text,
+                    file_name=sel_report,
+                    mime="text/markdown",
+                    key="er_dl_btn",
+                )
+            with st.container(border=True):
+                st.markdown(report_text)
+
+            # ── 対応ログファイルの表示 ────────────────────────────────
+            log_file = sel_report.replace(".md", ".log")
+            log_path = os.path.join(_LOGS_DIR, f"run-{log_file}")
+            if os.path.exists(log_path):
+                with st.expander("📋 実行ログを見る", expanded=False):
+                    try:
+                        with open(log_path, encoding="utf-8", errors="replace") as lf:
+                            st.code(lf.read(), language="text")
+                    except Exception:
+                        st.warning("ログファイルの読み込みに失敗しました。")
+        else:
+            st.warning("レポートファイルの読み込みに失敗しました。")
+
+
+# ===========================================================================
 # 画面描画: バックテストタブ
 # ===========================================================================
 
@@ -4736,11 +4873,12 @@ def main() -> None:
     </style>
     """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "🔍 スクリーニング",
         "👀 監視銘柄",
         "💼 ポジション管理",
         "📈 バックテスト",
+        "📰 決算レポート",
     ])
 
     with tab1:
@@ -4754,6 +4892,9 @@ def main() -> None:
 
     with tab4:
         render_backtest_tab()
+
+    with tab5:
+        render_earnings_report_tab()
 
 
 if __name__ == "__main__":
