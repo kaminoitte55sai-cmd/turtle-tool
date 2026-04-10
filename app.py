@@ -2291,7 +2291,8 @@ def render_funda_tab() -> None:
 
 def backtest_ticker(
     ticker:            str,
-    period_years:      int,
+    start_date:        str,
+    end_date:          str,
     donchian_days:     int   = 20,
     ema_fast:          int   = 5,
     ema_slow:          int   = 20,
@@ -2316,7 +2317,8 @@ def backtest_ticker(
 
     Args:
         ticker:            ティッカーシンボル
-        period_years:      バックテスト期間（年）
+        start_date:        取得開始日（YYYY-MM-DD）
+        end_date:          取得終了日（YYYY-MM-DD）
         donchian_days:     ドンチャンチャネル期間（日）
         ema_fast:          短期 EMA の期間
         ema_slow:          長期 EMA の期間
@@ -2328,13 +2330,12 @@ def backtest_ticker(
     Returns:
         (trades_list, error_message)
     """
-    EXTRA      = 5 if use_5day_lookback else 1   # delay_days 後の追加探索幅
-    LOOKBACK   = EXTRA  # 後方互換（スコア計算で参照）
-    PERIOD_MAP = {1: "1y", 3: "3y", 5: "5y"}
-    period_str = PERIOD_MAP.get(period_years, "1y")
+    EXTRA    = 5 if use_5day_lookback else 1   # delay_days 後の追加探索幅
+    LOOKBACK = EXTRA  # 後方互換（スコア計算で参照）
 
     try:
-        df = yf.download(ticker, period=period_str, progress=False, auto_adjust=True)
+        df = yf.download(ticker, start=start_date, end=end_date,
+                         progress=False, auto_adjust=True)
 
         if df.empty:
             return [], "データなし"
@@ -3445,40 +3446,80 @@ def render_backtest_tab() -> None:
     # ────────────────────────────────────────────────────────────────────────
     st.markdown("### ⚙️ バックテスト設定")
 
-    # 基本設定（1行目）
-    c1, c2, c3, c4, c5 = st.columns(5)
-    with c1:
-        period_years = st.selectbox(
-            "📅 検証期間",
-            options=[1, 3, 5],
-            index=1,
-            format_func=lambda x: f"{x}年",
-            help="yfinance から取得する過去データの期間",
-        )
-    with c2:
-        donchian_days = st.number_input(
-            "📐 ドンチャン期間（日）",
-            min_value=5, max_value=60, value=20, step=1,
-            help="N日高値上抜けをエントリー条件とする日数",
-        )
-    with c3:
-        ema_fast = st.number_input(
-            "📉 EMA 短期（期間）",
-            min_value=2, max_value=50, value=5, step=1,
-            help="デッドクロス判定の短期EMA期間（デフォルト: 5）",
-        )
-    with c4:
-        ema_slow = st.number_input(
-            "📈 EMA 長期（期間）",
-            min_value=5, max_value=200, value=20, step=1,
-            help="デッドクロス判定の長期EMA期間（デフォルト: 20）",
-        )
-    with c5:
-        use_5day = st.checkbox(
-            "過去5日以内ブレイクも対象",
-            value=False,
-            help="delay_days 後のウィンドウを±5日に拡張してブレイクシグナルを探す",
-        )
+    # 基本設定（1行目）— 日付レンジ + ショートカット
+    import datetime as _dt
+
+    _today     = _dt.date.today()
+    _dt_max    = _today
+    _dt_min    = _dt.date(2000, 1, 1)  # yfinance が対応する最古水準
+
+    # ショートカットボタンで開始日を変える
+    _sc_labels = {"1ヶ月": 30, "3ヶ月": 90, "6ヶ月": 180,
+                  "1年": 365, "3年": 365*3, "5年": 365*5, "10年": 365*10}
+    _sc_cols   = st.columns(len(_sc_labels))
+    for _sc_col, (_lbl, _days) in zip(_sc_cols, _sc_labels.items()):
+        if _sc_col.button(_lbl, key=f"bt_sc_{_lbl}", use_container_width=True):
+            st.session_state["bt_start_date"] = _today - _dt.timedelta(days=_days)
+            st.session_state["bt_end_date"]   = _today
+
+    _row1_c1, _row1_c2 = st.columns([0.5, 0.5])
+    with _row1_c1:
+        _d_cols = st.columns(2)
+        with _d_cols[0]:
+            bt_start = st.date_input(
+                "📅 開始日",
+                value=st.session_state.get("bt_start_date", _today - _dt.timedelta(days=365*3)),
+                min_value=_dt_min,
+                max_value=_dt_max,
+                key="bt_start_date",
+                help="バックテスト開始日（yfinanceの取得可能範囲内）",
+            )
+        with _d_cols[1]:
+            bt_end = st.date_input(
+                "📅 終了日",
+                value=st.session_state.get("bt_end_date", _today),
+                min_value=_dt_min,
+                max_value=_dt_max,
+                key="bt_end_date",
+                help="バックテスト終了日",
+            )
+        # 日数・開始>終了チェック
+        if bt_start >= bt_end:
+            st.error("開始日は終了日より前にしてください。")
+            bt_start = bt_end - _dt.timedelta(days=365)
+        _bt_days = (bt_end - bt_start).days
+        st.caption(f"検証期間: **{bt_start}** 〜 **{bt_end}**　（約 {_bt_days} 日 / {_bt_days//365}年{(_bt_days%365)//30}ヶ月）")
+
+    with _row1_c2:
+        _ind_cols = st.columns(3)
+        with _ind_cols[0]:
+            donchian_days = st.number_input(
+                "📐 ドンチャン期間（日）",
+                min_value=5, max_value=60, value=20, step=1,
+                help="N日高値上抜けをエントリー条件とする日数",
+            )
+        with _ind_cols[1]:
+            ema_fast = st.number_input(
+                "📉 EMA 短期",
+                min_value=2, max_value=50, value=5, step=1,
+                help="デッドクロス判定の短期EMA期間",
+            )
+        with _ind_cols[2]:
+            ema_slow = st.number_input(
+                "📈 EMA 長期",
+                min_value=5, max_value=200, value=20, step=1,
+                help="デッドクロス判定の長期EMA期間",
+            )
+
+    use_5day = st.checkbox(
+        "過去5日以内ブレイクも対象",
+        value=False,
+        help="delay_days 後のウィンドウを±5日に拡張してブレイクシグナルを探す",
+    )
+
+    # start/end を文字列に変換（yfinance に渡す）
+    bt_start_str = str(bt_start)
+    bt_end_str   = str(bt_end)
 
     # フィルター設定（2行目）— スクリーナーと同一条件
     st.markdown("#### 🔍 エントリーフィルター（スクリーナーと同一）")
@@ -3631,7 +3672,8 @@ def render_backtest_tab() -> None:
 
                 trades, err = backtest_ticker(
                     ticker            = ticker,
-                    period_years      = int(period_years),
+                    start_date        = bt_start_str,
+                    end_date          = bt_end_str,
                     donchian_days     = int(donchian_days),
                     ema_fast          = int(ema_fast),
                     ema_slow          = int(ema_slow),
@@ -3820,7 +3862,8 @@ DELAY_DAYS_LIST: list[int] = [0, 3, 5, 10, 15, 20, 30]
 
 def delayed_backtest_ticker(
     ticker:          str,
-    period_years:    int,
+    start_date:      str,
+    end_date:        str,
     donchian_days:   int   = 20,
     ema_fast:        int   = 5,
     ema_slow:        int   = 20,
@@ -3843,11 +3886,9 @@ def delayed_backtest_ticker(
         (trades_list, error_message)
         各 trade dict に "delay_days" キーを含む。
     """
-    PERIOD_MAP = {1: "1y", 3: "3y", 5: "5y"}
-    period_str = PERIOD_MAP.get(period_years, "1y")
-
     try:
-        df = yf.download(ticker, period=period_str, progress=False, auto_adjust=True)
+        df = yf.download(ticker, start=start_date, end=end_date,
+                         progress=False, auto_adjust=True)
         if df.empty:
             return [], "データなし"
         if isinstance(df.columns, pd.MultiIndex):
@@ -4042,12 +4083,31 @@ def render_time_filter_backtest() -> None:
     st.markdown("### ⚙️ 設定")
     cf1, cf2, cf3, cf4 = st.columns(4)
     with cf1:
-        tf_period = st.selectbox(
-            "📅 検証期間",
-            options=[1, 3, 5], index=1,
-            format_func=lambda x: f"{x}年",
-            key="tf_period",
-        )
+        import datetime as _dt
+        _tf_today = _dt.date.today()
+        _tf_d1, _tf_d2 = st.columns(2)
+        with _tf_d1:
+            tf_start = st.date_input(
+                "📅 開始日",
+                value=st.session_state.get("tf_start_date",
+                                           _tf_today - _dt.timedelta(days=365*3)),
+                min_value=_dt.date(2000, 1, 1),
+                max_value=_tf_today,
+                key="tf_start_date",
+            )
+        with _tf_d2:
+            tf_end = st.date_input(
+                "📅 終了日",
+                value=st.session_state.get("tf_end_date", _tf_today),
+                min_value=_dt.date(2000, 1, 1),
+                max_value=_tf_today,
+                key="tf_end_date",
+            )
+        if tf_start >= tf_end:
+            st.error("開始日は終了日より前にしてください。")
+            tf_start = tf_end - _dt.timedelta(days=365)
+        tf_start_str = str(tf_start)
+        tf_end_str   = str(tf_end)
     with cf2:
         tf_donchian = st.number_input(
             "📐 ドンチャン期間",
@@ -4116,7 +4176,8 @@ def render_time_filter_backtest() -> None:
 
                 trades, err = delayed_backtest_ticker(
                     ticker          = ticker,
-                    period_years    = int(tf_period),
+                    start_date      = tf_start_str,
+                    end_date        = tf_end_str,
                     donchian_days   = int(tf_donchian),
                     ema_fast        = 5,
                     ema_slow        = 20,
@@ -4311,7 +4372,8 @@ def render_time_filter_backtest() -> None:
 
 def _run_optimization(
     tickers:         list[str],
-    period_years:    int,
+    start_date:      str,
+    end_date:        str,
     donchian_days:   int,
     delay_list:      list[int],
     dd_list:         list[float],
@@ -4344,7 +4406,8 @@ def _run_optimization(
         for ticker in tickers:
             trades, _ = delayed_backtest_ticker(
                 ticker          = ticker,
-                period_years    = period_years,
+                start_date      = start_date,
+                end_date        = end_date,
                 donchian_days   = donchian_days,
                 ema_fast        = 5,
                 ema_slow        = 20,
@@ -4457,12 +4520,31 @@ def render_param_optimization() -> None:
 
     op1, op2 = st.columns(2)
     with op1:
-        opt_period = st.selectbox(
-            "📅 検証期間",
-            options=[1, 3, 5], index=1,
-            format_func=lambda x: f"{x}年",
-            key="opt_period",
-        )
+        import datetime as _dt
+        _opt_today = _dt.date.today()
+        _op_d1, _op_d2 = st.columns(2)
+        with _op_d1:
+            opt_start = st.date_input(
+                "📅 開始日",
+                value=st.session_state.get("opt_start_date",
+                                           _opt_today - _dt.timedelta(days=365*3)),
+                min_value=_dt.date(2000, 1, 1),
+                max_value=_opt_today,
+                key="opt_start_date",
+            )
+        with _op_d2:
+            opt_end = st.date_input(
+                "📅 終了日",
+                value=st.session_state.get("opt_end_date", _opt_today),
+                min_value=_dt.date(2000, 1, 1),
+                max_value=_opt_today,
+                key="opt_end_date",
+            )
+        if opt_start >= opt_end:
+            st.error("開始日は終了日より前にしてください。")
+            opt_start = opt_end - _dt.timedelta(days=365)
+        opt_start_str = str(opt_start)
+        opt_end_str   = str(opt_end)
         opt_donchian = st.number_input(
             "📐 ドンチャン期間（固定）",
             min_value=5, max_value=60, value=20, step=1,
@@ -4594,7 +4676,8 @@ def render_param_optimization() -> None:
 
                     trades, err = delayed_backtest_ticker(
                         ticker          = ticker,
-                        period_years    = int(opt_period),
+                        start_date      = opt_start_str,
+                        end_date        = opt_end_str,
                         donchian_days   = int(opt_donchian),
                         ema_fast        = 5,
                         ema_slow        = 20,
