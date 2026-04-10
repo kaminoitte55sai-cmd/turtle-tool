@@ -2292,34 +2292,44 @@ def render_funda_tab() -> None:
 def backtest_ticker(
     ticker:            str,
     period_years:      int,
-    donchian_days:     int  = 20,
-    ema_fast:          int  = 5,
-    ema_slow:          int  = 20,
-    use_5day_lookback: bool = False,
+    donchian_days:     int   = 20,
+    ema_fast:          int   = 5,
+    ema_slow:          int   = 20,
+    use_5day_lookback: bool  = False,
+    delay_days:        int   = 0,
+    vol_mult_thr:      float = 1.0,
+    dd_threshold:      float = -100.0,
 ) -> tuple[list[dict], str | None]:
     """
     ドンチャンブレイクアウト + EMAクロス EXIT 戦略のバックテスト（1銘柄）。
 
     エントリー条件:
         - Close > donchian_series (shift(1)使用 — 当日を含まない前N日の高値最大)
-        - use_5day_lookback=True の場合、過去5日以内のブレイクシグナルも有効
+        - delay_days 後に価格がブレイクレベル以上であること
+        - 待機期間中の最大下落が dd_threshold (%) 以上であること（負の値）
+        - ブレイク日の出来高倍率が vol_mult_thr 以上であること
+        - use_5day_lookback=True の場合、delay_days 後±5日以内のブレイクも有効
 
-    決済条件（ATR損切りは一切使用しない）:
-        - EMA(fast) < EMA(slow)  →  デッドクロス発生日の終値で決済
-        - データ終端まで未決済   →  最終日の終値で決済
+    決済条件:
+        - EMA(fast) < EMA(slow) → デッドクロス翌日の始値で決済
+        - データ終端まで未決済  → 最終日の終値で決済
 
     Args:
         ticker:            ティッカーシンボル
         period_years:      バックテスト期間（年）
         donchian_days:     ドンチャンチャネル期間（日）
-        ema_fast:          短期 EMA の期間（デフォルト: 5）
-        ema_slow:          長期 EMA の期間（デフォルト: 20）
-        use_5day_lookback: True のとき過去5日以内のブレイクも有効
+        ema_fast:          短期 EMA の期間
+        ema_slow:          長期 EMA の期間
+        use_5day_lookback: True のとき delay_days 後±5日以内のブレイクも有効
+        delay_days:        ブレイク後に待機する日数（0=即時）
+        vol_mult_thr:      ブレイク日の出来高倍率閾値（例: 1.5 = 平均の1.5倍以上）
+        dd_threshold:      待機期間中の最大下落率の下限（例: -3.0 = 3%超の下落はNG）
 
     Returns:
         (trades_list, error_message)
     """
-    LOOKBACK   = 5 if use_5day_lookback else 1
+    EXTRA      = 5 if use_5day_lookback else 1   # delay_days 後の追加探索幅
+    LOOKBACK   = EXTRA  # 後方互換（スコア計算で参照）
     PERIOD_MAP = {1: "1y", 3: "3y", 5: "5y"}
     period_str = PERIOD_MAP.get(period_years, "1y")
 
@@ -2370,11 +2380,11 @@ def backtest_ticker(
         trades:     list[dict] = []
         in_trade    = False
         entry_i     = -1
-        last_exit_i = -1   # 前回決済日（5日ルックバック重複防止）
+        last_exit_i = -1   # 前回決済日（重複防止）
         entry_price = 0.0
 
-        # ループ開始: donchian / EMA のデータが十分に揃う最初の日
-        start_i = max(donchian_days + LOOKBACK, ema_slow + 5)
+        # ループ開始: donchian / delay / EMA のデータが十分に揃う最初の日
+        start_i = max(donchian_days + delay_days + EXTRA, ema_slow + 5)
 
         for i in range(start_i, n):
 
@@ -2426,25 +2436,47 @@ def backtest_ticker(
                     in_trade    = False
 
             # ──────────────────────────────────────────────────────────────
-            # ② ノーポジション: エントリーシグナル検索
+            # ② ノーポジション: エントリーシグナル検索（フィルター付き）
             # ──────────────────────────────────────────────────────────────
             else:
-                # 過去 LOOKBACK 日（前回決済日より後）でブレイクアウトを検索
+                # delay_days 日前〜(delay_days + EXTRA - 1)日前の範囲でブレイクを探す
+                # lag = "現在バーiからブレイク発生バーjまでの距離"
+                # スクリーナーと同様: ブレイクは delay_days 以上前、
+                # かつ delay_days+EXTRA 未満前でなければならない
                 breakout_found = False
-                breakout_lag   = 0   # 0 = 当日, 1 = 1日前, …
+                breakout_lag   = 0
 
-                for lag in range(LOOKBACK):
-                    j = i - lag
-                    # 前回決済日以前のシグナルは再利用しない
+                for lag in range(delay_days, delay_days + EXTRA):
+                    j = i - lag          # ブレイク発生バー
                     if j <= last_exit_i or j < start_i:
                         break
                     dc = donchian_arr[j]
                     if np.isnan(dc):
                         continue
-                    if close_arr[j] > dc:
-                        breakout_found = True
-                        breakout_lag   = lag
-                        break
+                    if close_arr[j] <= dc:
+                        continue
+
+                    # ── 出来高フィルター（ブレイク発生日） ──────────────
+                    avg_v = avg_vol_arr[j]
+                    if avg_v > 0 and not np.isnan(avg_v):
+                        if float(vol_arr[j]) / avg_v < vol_mult_thr:
+                            continue   # 出来高不足
+
+                    # ── 価格継続フィルター（現在バーでもブレイク水準以上） ─
+                    if close_arr[i] <= float(close_arr[j]):
+                        continue
+
+                    # ── 待機DDフィルター（delay_days > 0 のときのみ） ────
+                    if delay_days > 0:
+                        window_low = low_arr[j: i + 1]
+                        min_price  = float(np.nanmin(window_low))
+                        waiting_dd = (min_price - float(close_arr[j])) / float(close_arr[j]) * 100
+                        if waiting_dd <= dd_threshold:
+                            continue   # 待機中に深押し → 除外
+
+                    breakout_found = True
+                    breakout_lag   = lag
+                    break
 
                 if not breakout_found:
                     continue
@@ -3264,8 +3296,9 @@ def render_backtest_tab() -> None:
     st.title("📈 バックテスト（ドンチャン + EMAクロス）")
     st.markdown("""
     ドンチャンブレイクアウト＋EMAクロス決済戦略の過去パフォーマンスを検証します。
-    - 📌 エントリー: ドンチャン上抜け **shift(1)** → 当日終値でエントリー
-    - 🔴 決済: **EMA(fast) < EMA(slow)** のデッドクロス → 当日終値で決済
+    - 📌 **エントリー**: ドンチャン上抜け → 遅延日数後に出来高・DD・価格継続を確認 → **翌日始値**でエントリー
+    - 🔴 **決済**: EMA(fast) < EMA(slow) のデッドクロス → **翌日始値**で決済
+    - 🔍 **フィルター**: スクリーナーと同一条件（遅延日数 / 待機DD / 出来高倍率）を適用可能
     - 📊 エントリー時スコアと実際のリターンの相関を分析
     """)
     st.divider()
@@ -3274,6 +3307,8 @@ def render_backtest_tab() -> None:
     # ① バックテスト設定
     # ────────────────────────────────────────────────────────────────────────
     st.markdown("### ⚙️ バックテスト設定")
+
+    # 基本設定（1行目）
     c1, c2, c3, c4, c5 = st.columns(5)
     with c1:
         period_years = st.selectbox(
@@ -3305,8 +3340,46 @@ def render_backtest_tab() -> None:
         use_5day = st.checkbox(
             "過去5日以内ブレイクも対象",
             value=False,
-            help="当日だけでなく、過去5営業日以内のブレイクシグナルでも当日終値でエントリー",
+            help="delay_days 後のウィンドウを±5日に拡張してブレイクシグナルを探す",
         )
+
+    # フィルター設定（2行目）— スクリーナーと同一条件
+    st.markdown("#### 🔍 エントリーフィルター（スクリーナーと同一）")
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        bt_delay = st.selectbox(
+            "⏱️ 遅延日数（delay_days）",
+            options=[0, 3, 5, 10, 20],
+            index=0,
+            format_func=lambda x: f"{x}日" if x > 0 else "即時（0日）",
+            key="bt_delay",
+            help="ブレイク後この日数が経過してから条件チェックしエントリー",
+        )
+    with f2:
+        bt_dd = st.selectbox(
+            "🛡️ 待機DD閾値（%）",
+            options=[-1.0, -2.0, -3.0, -5.0, -7.0, -10.0, -100.0],
+            index=6,
+            format_func=lambda x: "制限なし" if x == -100.0 else f"{x:.1f}%",
+            key="bt_dd",
+            help="待機期間中の最大下落率の下限（-3.0% → 3%超の下落はNG）。0日のときは無効。",
+        )
+    with f3:
+        bt_vol = st.slider(
+            "🔥 出来高倍率 閾値",
+            min_value=1.0, max_value=5.0, value=1.0, step=0.1,
+            format="%.1f×",
+            key="bt_vol",
+            help="ブレイク日の出来高 ÷ N日平均出来高がこの値以上の銘柄のみ通過（1.0=制限なし）",
+        )
+
+    st.caption(
+        f"📌 エントリー条件: ドンチャン{donchian_days}日 ｜ "
+        f"遅延{bt_delay}日 ｜ "
+        f"待機DD > {'制限なし' if bt_dd == -100.0 else f'{bt_dd:.1f}%'} ｜ "
+        f"出来高 ≥ {bt_vol:.1f}×　／　"
+        f"決済: EMA({ema_fast}/{ema_slow}) デッドクロス翌日始値"
+    )
 
     # ────────────────────────────────────────────────────────────────────────
     # ② 銘柄リスト（プリセット / CSV アップロード / 手動入力）
@@ -3426,6 +3499,9 @@ def render_backtest_tab() -> None:
                     ema_fast          = int(ema_fast),
                     ema_slow          = int(ema_slow),
                     use_5day_lookback = use_5day,
+                    delay_days        = int(bt_delay),
+                    vol_mult_thr      = float(bt_vol),
+                    dd_threshold      = float(bt_dd),
                 )
                 all_trades.extend(trades)
                 if err:
