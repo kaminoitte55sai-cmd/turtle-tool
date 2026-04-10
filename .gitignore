@@ -1,0 +1,7 @@
+*.pkl
+*.csv
+__pycache__/
+turtle_save.json
+filter_save.json
+memo_save.json
+.claude.json

@@ -1,0 +1,4253 @@
+"""
+app.py
+======
+タートルズ資金管理ツール + ブレイクアウトスクリーナー（実戦強化版）
+Streamlit UI（タブ構成）
+
+実行方法:
+    streamlit run app.py
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import requests as _req
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")          # Streamlit 環境では非インタラクティブ backend を指定
+import matplotlib.pyplot as plt
+import yfinance as yf
+import streamlit as st
+import jpholiday
+
+from utils import fetch_exchange_rate, fetch_market_data, is_japan_stock
+
+# ===========================================================================
+# ページ設定
+# ===========================================================================
+st.set_page_config(
+    page_title="タートルズ 資金管理ツール",
+    page_icon="🐢",
+    layout="wide",
+)
+
+# ===========================================================================
+# 銘柄プリセット定数
+# ===========================================================================
+
+TOPIX100_TICKERS = [
+    # 情報・通信
+    "9432.T", "9433.T", "9434.T", "9984.T", "9613.T", "4704.T",
+    # 電機・精密
+    "6758.T", "6861.T", "8035.T", "6723.T", "6762.T", "6981.T",
+    "6971.T", "6857.T", "6146.T", "6702.T", "6501.T", "6954.T",
+    "6902.T", "6594.T", "6645.T", "6367.T", "6976.T", "7733.T", "6503.T",
+    # 自動車・輸送機器
+    "7203.T", "7267.T", "7270.T", "7201.T", "7309.T",
+    # 銀行
+    "8306.T", "8316.T", "8411.T", "8309.T",
+    # 保険・証券・その他金融
+    "8766.T", "8630.T", "8750.T", "8725.T", "8795.T",
+    "8591.T", "8604.T", "8601.T", "8697.T",
+    # 製薬・ヘルスケア
+    "4502.T", "4519.T", "4568.T", "4523.T", "4503.T",
+    "4507.T", "4543.T", "4578.T", "6869.T", "4151.T",
+    # 商社
+    "8058.T", "8031.T", "8001.T", "8002.T", "8053.T", "8015.T",
+    # 化学・素材
+    "4063.T", "3407.T", "4188.T", "4183.T", "4901.T",
+    "4452.T", "4911.T", "5201.T", "5713.T",
+    # 重工業・機械
+    "7011.T", "7012.T", "7013.T", "6301.T", "6326.T", "6273.T", "6506.T",
+    # 鉄鋼・非鉄
+    "5401.T", "5411.T", "5802.T",
+    # 不動産
+    "8802.T", "8801.T", "8830.T",
+    # 小売・消費財
+    "9983.T", "3382.T", "8267.T", "9843.T",
+    # 食品・飲料・たばこ
+    "2802.T", "2502.T", "2503.T", "2914.T",
+    # 海運
+    "9101.T", "9104.T", "9107.T",
+    # 陸運・物流
+    "9020.T", "9022.T", "9021.T", "9064.T", "9062.T",
+    # エネルギー
+    "5020.T", "5019.T",
+    # その他
+    "7741.T", "6098.T", "4661.T", "5108.T", "7751.T",
+    "2413.T", "3092.T", "6178.T", "6460.T",
+]
+
+_NIKKEI225_EXTRA = [
+    "1332.T", "1333.T", "1605.T",
+    "1721.T", "1801.T", "1802.T", "1803.T", "1812.T", "1925.T", "1928.T",
+    "2002.T", "2269.T", "2282.T", "2432.T", "2501.T", "2531.T", "2768.T",
+    "3105.T", "3401.T", "3402.T", "3405.T", "3436.T", "3861.T",
+    "4021.T", "4042.T", "4061.T", "4208.T", "4307.T", "4324.T",
+    "4385.T", "4612.T", "4631.T", "4689.T",
+    "5101.T", "5214.T", "5332.T", "5333.T", "5334.T",
+    "5406.T", "5631.T", "5711.T", "5714.T", "5801.T", "5803.T",
+    "6103.T", "6113.T", "6201.T", "6268.T", "6302.T", "6305.T",
+    "6361.T", "6383.T", "6471.T", "6479.T", "6508.T", "6586.T", "6674.T",
+    "6701.T", "6724.T", "6752.T", "6753.T", "6770.T", "6841.T", "6952.T", "6963.T",
+    "7003.T", "7181.T", "7182.T", "7211.T", "7240.T", "7259.T",
+    "7261.T", "7272.T", "7276.T", "7731.T", "7735.T", "7752.T",
+    "7832.T", "7911.T", "7912.T", "7951.T",
+    "8233.T", "8252.T", "8253.T", "8308.T", "8331.T", "8354.T",
+    "9001.T", "9005.T", "9007.T", "9008.T", "9009.T",
+    "9042.T", "9045.T", "9048.T", "9301.T",
+    "9501.T", "9502.T", "9503.T", "9531.T", "9532.T",
+    "9602.T", "9735.T", "9766.T",
+]
+
+NIKKEI225_TICKERS = list(dict.fromkeys(TOPIX100_TICKERS + _NIKKEI225_EXTRA))
+
+# ===========================================================================
+# その他定数
+# ===========================================================================
+INITIAL_ROWS   = 20
+MARGIN_BALANCE = 5_000_000
+
+READONLY_COLS = [
+    "銘柄名", "前日終値", "ATR", "ユニットサイズ", "1日のリスク",
+    "ロスカットライン", "購入価格(円)", "購入価格(USD)",
+]
+
+NUMERIC_COLS = [
+    "前日終値", "ATR", "ユニットサイズ", "保有株数", "1日のリスク",
+    "建玉時株価", "ロスカットライン", "購入価格(円)", "購入価格(USD)",
+]
+
+NAN          = float("nan")
+SAVE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "turtle_save.json")
+MASTER_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_save.pkl")
+FILTER_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filter_save.json")
+FUNDA_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fundamental_list.csv")
+MEMO_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memo_save.json")
+
+# フィルター設定の保存対象キー（session_state のキーと対応）
+_FILTER_KEYS = [
+    "sc_market_options",
+    "sc_industry_options",
+    "sc_topix_only",
+    "sc_topix_size",
+]
+
+PRESET_OPTIONS = [
+    "手動入力",
+    f"TOPIX100 プリセット（{len(TOPIX100_TICKERS)}銘柄）",
+    f"日経225 プリセット（約{len(NIKKEI225_TICKERS)}銘柄）",
+]
+
+# 戦略比較: 戦略キー → 表示名
+STRATEGIES: dict[str, str] = {
+    "momentum":   "📈 モメンタム（ブレイク強度 + 出来高）",
+    "squeeze":    "🗜️ スクイーズ（レンジ圧縮）",
+    "volatility": "🌊 ボラティリティ（ATR比率）",
+    "trend":      "📊 トレンド（MA傾き）",
+    "event":      "⭐ 複合スコア（全要素均等）",
+}
+
+# ===========================================================================
+# 保存 / 読み込み
+# ===========================================================================
+
+def save_state() -> None:
+    records = st.session_state.df.to_dict("records")
+    clean = [
+        {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in row.items()}
+        for row in records
+    ]
+    data = {
+        "n_rows":       st.session_state.n_rows,
+        "capital":      st.session_state.capital,
+        "losscut_mult": st.session_state.losscut_mult,
+        "risk_pct":     st.session_state.risk_pct,
+        "prev_tickers": st.session_state.prev_tickers,
+        "fx_rates":     st.session_state.fx_rates,
+        "df_records":   clean,
+    }
+    with open(SAVE_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False)
+
+
+def load_state() -> dict | None:
+    if not os.path.exists(SAVE_FILE):
+        return None
+    try:
+        with open(SAVE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def records_to_df(records: list[dict]) -> pd.DataFrame:
+    df = pd.DataFrame(records)
+    for col in NUMERIC_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = NAN
+    for col in ["銘柄コード", "銘柄名"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str)
+    if "売買" in df.columns:
+        df["売買"] = df["売買"].fillna("買い").astype(str)
+    if "購入価格" in df.columns and "購入価格(円)" not in df.columns:
+        df.rename(columns={"購入価格": "購入価格(円)"}, inplace=True)
+    return df
+
+
+# ===========================================================================
+# ポジション計算タブ: DataFrame 初期化
+# ===========================================================================
+
+def empty_row() -> dict:
+    return {
+        "銘柄コード":       "",
+        "銘柄名":           "",
+        "前日終値":         NAN,
+        "ATR":              NAN,
+        "ユニットサイズ":   NAN,
+        "保有株数":         NAN,
+        "1日のリスク":      NAN,
+        "建玉時株価":       NAN,
+        "売買":             "買い",
+        "ロスカットライン": NAN,
+        "購入価格(円)":     NAN,
+        "購入価格(USD)":    NAN,
+    }
+
+
+def make_empty_df(n: int) -> pd.DataFrame:
+    return pd.DataFrame([empty_row() for _ in range(n)])
+
+
+def init_state() -> None:
+    if "df" in st.session_state:
+        return
+
+    saved = load_state()
+    if saved:
+        n = saved.get("n_rows", INITIAL_ROWS)
+        st.session_state.n_rows       = n
+        st.session_state.capital      = saved.get("capital", 1_000_000)
+        st.session_state.losscut_mult = saved.get("losscut_mult", 2.0)
+        st.session_state.risk_pct     = saved.get("risk_pct", 0.01)
+        st.session_state.prev_tickers = saved.get("prev_tickers", [""] * n)
+        st.session_state.fx_rates     = saved.get("fx_rates", [1.0] * n)
+        st.session_state.df           = records_to_df(saved["df_records"])
+    else:
+        st.session_state.n_rows       = INITIAL_ROWS
+        st.session_state.capital      = 1_000_000
+        st.session_state.losscut_mult = 2.0
+        st.session_state.risk_pct     = 0.01
+        st.session_state.prev_tickers = [""] * INITIAL_ROWS
+        st.session_state.fx_rates     = [1.0] * INITIAL_ROWS
+        st.session_state.df           = make_empty_df(INITIAL_ROWS)
+
+    if "screener_results"     not in st.session_state:
+        st.session_state.screener_results     = None
+    if "screener_input"       not in st.session_state:
+        st.session_state.screener_input       = "7203, 9984, 6758, 8306, 9433, 6367, 8035, 4063, 6501, 6857"
+    if "screener_prev_preset" not in st.session_state:
+        st.session_state.screener_prev_preset = PRESET_OPTIONS[0]
+
+    # バックテストタブ用セッション変数
+    if "bt_results"      not in st.session_state:
+        st.session_state.bt_results      = None
+    if "bt_raw_trades"   not in st.session_state:
+        st.session_state.bt_raw_trades   = []        # 戦略比較用の生トレードリスト
+    if "bt_ticker_input" not in st.session_state:
+        st.session_state.bt_ticker_input = "7203, 9984, 6758, 8306, 9433"
+    if "bt_prev_preset"  not in st.session_state:
+        st.session_state.bt_prev_preset  = PRESET_OPTIONS[0]
+    if "bt_csv_file_id"  not in st.session_state:
+        st.session_state.bt_csv_file_id  = None
+    if "tf_results"      not in st.session_state:
+        st.session_state.tf_results      = None
+    if "opt_results"     not in st.session_state:
+        st.session_state.opt_results     = None
+
+    # スクリーナータブ用セッション変数
+    _SC_DEFAULT = "7203, 9984, 6758, 8306, 9433"
+    if "sc_ticker_input"  not in st.session_state:
+        st.session_state.sc_ticker_input  = _SC_DEFAULT
+    if "sc_ticker_area"   not in st.session_state:
+        st.session_state.sc_ticker_area   = _SC_DEFAULT
+    if "sc_prev_preset"   not in st.session_state:
+        st.session_state.sc_prev_preset   = PRESET_OPTIONS[0]
+    if "sc_csv_file_id"   not in st.session_state:
+        st.session_state.sc_csv_file_id   = None
+
+    # フィルター設定をファイルから復元（保存済みの場合のみ上書き）
+    if os.path.exists(FILTER_FILE):
+        try:
+            with open(FILTER_FILE, encoding="utf-8") as _ff:
+                _saved_filters = json.load(_ff)
+            for _fk in _FILTER_KEYS:
+                if _fk in _saved_filters and _fk not in st.session_state:
+                    st.session_state[_fk] = _saved_filters[_fk]
+        except Exception:
+            pass
+
+    # 銘柄マスタ / ファンダ分析リスト
+    if "master" not in st.session_state:
+        # ページリロード後もマスタを保持するためファイルから復元
+        import pickle as _pkl
+        if os.path.exists(MASTER_FILE):
+            try:
+                with open(MASTER_FILE, "rb") as _f:
+                    _saved_master = _pkl.load(_f)
+                st.session_state.master      = _saved_master.get("master")
+                st.session_state.last_update = _saved_master.get("last_update")
+            except Exception:
+                st.session_state.master      = None
+                st.session_state.last_update = None
+        else:
+            st.session_state.master      = None
+            st.session_state.last_update = None
+    if "last_update" not in st.session_state:
+        st.session_state.last_update = None
+    if "funda_list" not in st.session_state:
+        st.session_state.funda_list = []   # スクリーニング → ファンダタブへの橋渡しコードリスト
+    if "fund_df" not in st.session_state:
+        st.session_state.fund_df = load_funda_data()   # ファンダ一覧 DataFrame（CSV 永続化）
+    if "funda_memos" not in st.session_state:
+        st.session_state.funda_memos = load_memo_data()  # 銘柄メモ dict {code: text}
+
+
+# ===========================================================================
+# ポジション計算タブ: ティッカー処理
+# ===========================================================================
+
+def normalize_ticker(code: str) -> str:
+    code = code.strip().upper()
+    if not code:
+        return code
+    if code.endswith(".T"):
+        return code
+    if code.isdigit():
+        return code + ".T"
+    return code
+
+
+def get_ticker_name(ticker: str) -> str:
+    if is_japan_stock(ticker):
+        try:
+            r = _req.get(
+                "https://query1.finance.yahoo.com/v1/finance/search",
+                params={"q": ticker, "lang": "ja", "region": "JP", "newsCount": 0},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=5,
+            )
+            for q in r.json().get("quotes", []):
+                if q.get("symbol") == ticker:
+                    name = q.get("longname") or q.get("shortname")
+                    if name:
+                        return name
+        except Exception:
+            pass
+    try:
+        info = yf.Ticker(ticker).info
+        return info.get("longName") or info.get("shortName") or ticker
+    except Exception:
+        return ticker
+
+
+# ===========================================================================
+# ポジション計算タブ: 計算ヘルパー
+# ===========================================================================
+
+def _ok(val) -> bool:
+    try:
+        return val is not None and not pd.isna(val)
+    except Exception:
+        return False
+
+
+def to_man_en(value: float) -> str:
+    man = value / 10_000
+    return f"{int(man)}万円" if man == int(man) else f"{man:.1f}万円"
+
+
+def _floor_jp(value: float, japan: bool) -> float:
+    return float(math.floor(value)) if japan else value
+
+
+def calc_unit_size(capital_jpy, risk_pct, atr, japan, fx_rate) -> float | None:
+    if not _ok(atr) or float(atr) == 0:
+        return None
+    cap = capital_jpy if japan else capital_jpy / fx_rate
+    return round(cap * risk_pct / float(atr), 1)
+
+
+def calc_daily_risk_ratio(unit_size, shares_held) -> float | None:
+    if not _ok(unit_size) or not _ok(shares_held):
+        return None
+    u, h = float(unit_size), float(shares_held)
+    return None if u == 0 else round(h / u, 2)
+
+
+def calc_losscut(entry_price, atr, losscut_mult: float, is_buy: bool, japan: bool = False) -> float | None:
+    if not _ok(entry_price) or not _ok(atr):
+        return None
+    delta  = losscut_mult * float(atr)
+    base   = float(entry_price)
+    result = base - delta if is_buy else base + delta
+    return _floor_jp(round(result, 2), japan)
+
+
+def calc_purchase(shares_held, entry_price, japan: bool, fx_rate: float) -> tuple[float | None, float | None]:
+    if not _ok(shares_held) or not _ok(entry_price):
+        return None, None
+    shares = float(shares_held)
+    entry  = float(entry_price)
+    if japan:
+        return round(shares * entry, 0), None
+    else:
+        usd = round(shares * entry, 2)
+        return round(usd * fx_rate, 0), usd
+
+
+def recalc_row(i: int, capital: float, risk_pct: float, losscut_mult: float) -> bool:
+    df     = st.session_state.df
+    ticker = df.at[i, "銘柄コード"]
+    atr    = df.at[i, "ATR"]
+    if not ticker or not _ok(atr):
+        return False
+
+    japan, fx, changed = is_japan_stock(ticker), st.session_state.fx_rates[i], False
+
+    new_unit = calc_unit_size(capital, risk_pct, float(atr), japan, fx)
+    if new_unit != df.at[i, "ユニットサイズ"]:
+        df.at[i, "ユニットサイズ"] = new_unit if new_unit is not None else NAN
+        changed = True
+    else:
+        new_unit = df.at[i, "ユニットサイズ"]
+
+    new_ratio, cur_ratio = calc_daily_risk_ratio(new_unit, df.at[i, "保有株数"]), df.at[i, "1日のリスク"]
+    if not (not _ok(new_ratio) and not _ok(cur_ratio)) and new_ratio != cur_ratio:
+        df.at[i, "1日のリスク"] = new_ratio if new_ratio is not None else NAN
+        changed = True
+
+    is_buy = df.at[i, "売買"] == "買い"
+    new_lc = calc_losscut(df.at[i, "建玉時株価"], float(atr), losscut_mult, is_buy, japan)
+    cur_lc = df.at[i, "ロスカットライン"]
+    if not (not _ok(new_lc) and not _ok(cur_lc)) and new_lc != cur_lc:
+        df.at[i, "ロスカットライン"] = new_lc if new_lc is not None else NAN
+        changed = True
+
+    new_jpy, new_usd = calc_purchase(df.at[i, "保有株数"], df.at[i, "建玉時株価"], japan, fx)
+    cur_jpy, cur_usd = df.at[i, "購入価格(円)"], df.at[i, "購入価格(USD)"]
+    if not (not _ok(new_jpy) and not _ok(cur_jpy)) and new_jpy != cur_jpy:
+        df.at[i, "購入価格(円)"] = new_jpy if new_jpy is not None else NAN
+        changed = True
+    if not (not _ok(new_usd) and not _ok(cur_usd)) and new_usd != cur_usd:
+        df.at[i, "購入価格(USD)"] = new_usd if new_usd is not None else NAN
+        changed = True
+
+    return changed
+
+
+# ===========================================================================
+# ポジション計算タブ: 行操作
+# ===========================================================================
+
+def clear_row(i: int) -> None:
+    for k, v in empty_row().items():
+        st.session_state.df.at[i, k] = v
+    st.session_state.prev_tickers[i] = ""
+    st.session_state.fx_rates[i]     = 1.0
+
+
+def delete_row(i: int) -> None:
+    df = st.session_state.df.drop(index=i).reset_index(drop=True)
+    st.session_state.df = df
+    st.session_state.prev_tickers.pop(i)
+    st.session_state.fx_rates.pop(i)
+    st.session_state.n_rows -= 1
+
+
+def move_row(i: int, direction: int) -> None:
+    j = i + direction
+    n = st.session_state.n_rows
+    if j < 0 or j >= n:
+        return
+    idx = list(range(n))
+    idx[i], idx[j] = idx[j], idx[i]
+    st.session_state.df = st.session_state.df.iloc[idx].reset_index(drop=True)
+    pt = st.session_state.prev_tickers
+    pt[i], pt[j] = pt[j], pt[i]
+    fx = st.session_state.fx_rates
+    fx[i], fx[j] = fx[j], fx[i]
+
+
+def add_row() -> None:
+    new_row = pd.DataFrame([empty_row()])
+    st.session_state.df = pd.concat([st.session_state.df, new_row], ignore_index=True)
+    st.session_state.prev_tickers.append("")
+    st.session_state.fx_rates.append(1.0)
+    st.session_state.n_rows += 1
+
+
+# ===========================================================================
+# 銘柄マスタ: JPX公式データ取得
+# ===========================================================================
+
+@st.cache_data(ttl=86400)
+def load_jpx_data() -> pd.DataFrame:
+    """JPX公式XLSから銘柄マスタを取得して返す（24hキャッシュ）。
+
+    JPXは2024年頃にCSV提供を廃止しXLS形式に変更。
+    URL: .../tvdivq0000001vg2-att/data_j.xls
+    カラム: 日付, コード, 銘柄名, 市場・商品区分, 33業種区分 ...
+    """
+    import io as _io
+    url = (
+        "https://www.jpx.co.jp/markets/statistics-equities/misc/"
+        "tvdivq0000001vg2-att/data_j.xls"
+    )
+    resp = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    resp.raise_for_status()
+
+    df = pd.read_excel(_io.BytesIO(resp.content), engine="xlrd", dtype=str)
+
+    df = df.rename(columns={
+        "コード":         "code",
+        "銘柄名":         "name",
+        "市場・商品区分": "market",
+        "33業種区分":     "industry",
+    })
+
+    # コード正規化: "1301" or "1301.0" → "1301.T"
+    df["code"] = (
+        df["code"].astype(str).str.strip()
+        .str.split(".").str[0].str.zfill(4) + ".T"
+    )
+
+    cols = [c for c in ["code", "name", "market", "industry"] if c in df.columns]
+    return df[cols].reset_index(drop=True)
+
+
+@st.cache_data(ttl=86400)
+def load_topix_detail() -> pd.DataFrame:
+    """JPXからTOPIX構成銘柄・指数区分を取得して返す（24hキャッシュ）。
+
+    URL: /automation/markets/indices/topix/files/topixweight_j.csv
+    カラム: 日付, 銘柄名, コード, 業種, TOPIXに占める個別銘柄のウエイト, ニューインデックス区分
+    ニューインデックス区分: TOPIX Core30 / TOPIX Large70 / TOPIX Mid400 / TOPIX Small 1 / TOPIX Small 2
+    """
+    url = (
+        "https://www.jpx.co.jp/automation/markets/indices/topix/"
+        "files/topixweight_j.csv"
+    )
+    resp = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+    resp.raise_for_status()
+
+    import io as _io
+    df = pd.read_csv(_io.BytesIO(resp.content), encoding="shift-jis", dtype=str)
+
+    df = df.rename(columns={
+        "コード":             "code",
+        "ニューインデックス区分": "topix_size",
+    })
+
+    # コード正規化: "1301" → "1301.T"
+    df["code"] = (
+        df["code"].astype(str).str.strip()
+        .str.split(".").str[0].str.zfill(4) + ".T"
+    )
+
+    # 指数区分を短縮名に変換
+    SIZE_MAP = {
+        "TOPIX Core30":  "Core30",
+        "TOPIX Large70": "Large70",
+        "TOPIX Mid400":  "Mid400",
+        "TOPIX Small 1": "Small1",
+        "TOPIX Small 2": "Small2",
+    }
+    df["topix_size"] = df["topix_size"].map(SIZE_MAP).fillna("Other")
+    df["topix_flag"] = True
+
+    return df[["code", "topix_flag", "topix_size"]].drop_duplicates("code").reset_index(drop=True)
+
+
+@st.cache_data(ttl=86400)
+def get_market_cap(code: str):
+    """yfinance から時価総額を取得（24hキャッシュ）"""
+    try:
+        return yf.Ticker(code).info.get("marketCap")
+    except Exception:
+        return None
+
+
+# ===========================================================================
+# スクリーナー: 銘柄名取得（キャッシュ付き）
+# ===========================================================================
+
+@st.cache_data(ttl=3600)
+def _get_stock_name(ticker: str) -> str:
+    """
+    yfinance から銘柄名を取得（1時間キャッシュ）。
+    日本株（.T）は shortName（日本語）を優先する。
+    """
+    try:
+        info = yf.Ticker(ticker).info
+        if ticker.upper().endswith(".T"):
+            name = info.get("shortName") or info.get("longName") or ticker
+        else:
+            name = info.get("longName") or info.get("shortName") or ticker
+        return name or ticker
+    except Exception:
+        return ticker
+
+
+# ===========================================================================
+# スクリーナー: 1銘柄スクリーニング（コアロジック）
+# ===========================================================================
+
+def screen_ticker(
+    ticker:        str,
+    donchian_days: int,
+    vol_mult_thr:  float,
+    delay_days:    int,
+    dd_threshold:  float,
+) -> tuple[dict | None, str | None]:
+    """
+    時間フィルター＋待機DDフィルター付きブレイクアウトスクリーナー。
+
+    ロジック:
+        1. ドンチャン高値上抜け（shift(1)使用）を検出
+        2. ブレイク日から delay_days 後の価格がブレイク価格を上回るか確認
+        3. 待機期間中の最大下落が dd_threshold 以内か確認
+        4. 出来高倍率が vol_mult_thr 以上か確認
+
+    Returns:
+        (metrics_dict, None) : 条件通過
+        (None, None)         : 条件不通過（エラーなし）
+        (None, error_msg)    : データ取得失敗
+    """
+    SEARCH_WINDOW = delay_days + 8
+
+    try:
+        df = yf.download(ticker, period="6mo", progress=False, auto_adjust=True)
+
+        if df.empty:
+            return None, "データなし"
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        min_rows = max(donchian_days + SEARCH_WINDOW + 5, 40)
+        if len(df) < min_rows:
+            return None, f"データ不足（{len(df)}日）"
+
+        close_arr    = df["Close"].to_numpy(dtype=float)
+        low_arr      = df["Low"].to_numpy(dtype=float)
+        vol_arr      = df["Volume"].to_numpy(dtype=float)
+        donchian_arr = df["High"].rolling(donchian_days).max().shift(1).to_numpy(dtype=float)
+        avg_vol_arr  = df["Volume"].rolling(donchian_days).mean().shift(1).to_numpy(dtype=float)
+
+        n       = len(df)
+        today_i = n - 1
+
+        for days_since_break in range(delay_days, SEARCH_WINDOW):
+            breakout_i = today_i - days_since_break
+
+            if breakout_i < donchian_days + 1:
+                break
+
+            dc = donchian_arr[breakout_i]
+            if np.isnan(dc) or dc <= 0:
+                continue
+
+            bo_close = float(close_arr[breakout_i])
+            if bo_close <= dc:
+                continue
+
+            avg_v = float(avg_vol_arr[breakout_i])
+            if avg_v <= 0 or np.isnan(avg_v):
+                continue
+            vol_ratio = float(vol_arr[breakout_i]) / avg_v
+            if vol_ratio < vol_mult_thr:
+                continue
+
+            entry_i = breakout_i + delay_days
+            if entry_i > today_i:
+                continue
+
+            entry_close = float(close_arr[entry_i])
+            if entry_close <= bo_close:
+                continue
+
+            waiting_dd = 0.0
+            if delay_days > 0:
+                window_low = low_arr[breakout_i : entry_i + 1]
+                min_price  = float(np.nanmin(window_low))
+                waiting_dd = (min_price - bo_close) / bo_close * 100
+                if waiting_dd <= dd_threshold:
+                    continue
+
+            _today_price   = float(close_arr[today_i])
+            _breakout_date = df.index[breakout_i].date()
+            _today_date    = pd.Timestamp.now().date()
+            # 祝日リストを生成（ブレイク日〜今日の範囲）
+            import datetime as _dt
+            _holidays = [
+                _d for _d in (
+                    _breakout_date + _dt.timedelta(days=_i)
+                    for _i in range((_today_date - _breakout_date).days + 1)
+                )
+                if jpholiday.is_holiday(_d)
+            ]
+            _elapsed_days = int(np.busday_count(
+                _breakout_date, _today_date,
+                holidays=[str(_h) for _h in _holidays],
+            ))
+            _price_change  = (_today_price / bo_close - 1) * 100
+
+            return {
+                "ティッカー":      ticker,
+                "現在価格":        round(_today_price, 2),
+                "経過日数":        _elapsed_days,
+                "ブレイク比(%)":   round(_price_change, 2),
+                "出来高倍率":      round(vol_ratio, 2),
+                "waiting_dd(%)":   round(waiting_dd, 2),
+                "delay日数":       delay_days,
+                "ブレイク日":      str(_breakout_date),
+                "ブレイク価格":    round(bo_close, 2),
+                "エントリー価格":  round(entry_close, 2),
+            }, None
+
+        return None, None
+
+    except Exception as e:
+        return None, str(e)
+
+
+# ===========================================================================
+# スクリーナー: CSV 銘柄コード解析
+# ===========================================================================
+
+def _parse_screener_csv(uploaded_file) -> tuple[list[str], str | None]:
+    """
+    スクリーナー用 CSV から銘柄コードリストを抽出する（3段階フォールバック）。
+    """
+    import re as _re
+
+    def _looks_like_code(val: str) -> bool:
+        v = val.strip().split(".")[0]
+        return v.isdigit() and 3 <= len(v) <= 6
+
+    try:
+        csv_df = pd.read_csv(uploaded_file, dtype=str)
+        orig_cols = list(csv_df.columns)
+        norm_cols = [c.strip().lower() for c in orig_cols]
+
+        col_candidates = [
+            "ticker", "code", "symbol",
+            "銘柄コード", "証券コード", "コード", "ｺｰﾄﾞ",
+            "銘柄cd", "銘柄ｃｄ", "銘柄", "ティッカー",
+        ]
+        target_col = None
+        for cand in col_candidates:
+            cand_norm = cand.strip().lower()
+            if cand_norm in norm_cols:
+                target_col = orig_cols[norm_cols.index(cand_norm)]
+                break
+
+        if target_col is None:
+            kw_list = ["コード", "code", "ticker", "symbol", "銘柄"]
+            for kw in kw_list:
+                kw_n = kw.lower()
+                for orig, norm in zip(orig_cols, norm_cols):
+                    if kw_n in norm:
+                        target_col = orig
+                        break
+                if target_col:
+                    break
+
+        if target_col is None:
+            best_col, best_score = None, 0
+            for col in orig_cols:
+                vals  = csv_df[col].dropna().astype(str)
+                score = sum(1 for v in vals if _looks_like_code(v))
+                if score > best_score:
+                    best_score = score
+                    best_col   = col
+            target_col = best_col or orig_cols[0]
+
+        raw = csv_df[target_col].dropna().astype(str).str.strip()
+
+        tickers: list[str] = []
+        for val in raw:
+            val = val.strip()
+            if not val or val.lower() in ("nan", "none", ""):
+                continue
+            base = val.split(".")[0].strip()
+            if base.isdigit():
+                val = base + ".T"
+            elif not val.replace(".", "").replace("-", "").replace("_", "").replace(" ", "").isalnum():
+                continue
+            tickers.append(val.upper())
+
+        tickers = list(dict.fromkeys(tickers))
+        if not tickers:
+            return [], "CSVに有効な銘柄コードが見つかりませんでした。"
+        return tickers, None
+
+    except Exception as e:
+        return [], f"CSV読み込みエラー: {e}"
+
+
+# ===========================================================================
+# 画面描画: ポジションサイズ計算タブ
+# ===========================================================================
+
+def render_position_tab() -> None:
+    n_rows = st.session_state.n_rows
+
+    total_purchase = float(st.session_state.df["購入価格(円)"].dropna().sum())
+    balance        = st.session_state.capital - total_purchase
+
+    # タイトル ＋ 右上残高
+    title_col, bal_col = st.columns([0.5, 0.5])
+    with title_col:
+        st.title("🐢 タートルズ ポジションサイズ計算ツール")
+    with bal_col:
+        st.markdown(
+            f"""
+            <div style="text-align:right; padding-top:20px; line-height:2.2;">
+              <span style="color:#888; font-size:13px;">残高</span>&nbsp;&nbsp;
+              <strong style="font-size:18px;">¥{balance:,.0f}-</strong>
+              &nbsp;&nbsp;&nbsp;&nbsp;
+              <span style="color:#888; font-size:13px;">信用取引残高</span>&nbsp;&nbsp;
+              <strong style="font-size:18px;">¥{MARGIN_BALANCE:,.0f}-</strong>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    capital = c1.number_input(
+        "💴 投資資金（円）",
+        min_value=100_000, max_value=1_000_000_000,
+        value=st.session_state.capital,
+        step=100_000, format="%d",
+    )
+    c1.caption(f"≈ {to_man_en(capital)}")
+
+    losscut_mult = c2.number_input(
+        "✂️ ロスカット幅（× ATR）",
+        min_value=0.5, max_value=5.0,
+        value=st.session_state.losscut_mult,
+        step=0.5, format="%.1f",
+    )
+    risk_pct_display = c3.slider(
+        "📊 リスク割合（%）",
+        min_value=0.5, max_value=3.0,
+        value=st.session_state.risk_pct * 100,
+        step=0.1, format="%.1f%%",
+    )
+    risk_pct   = risk_pct_display / 100
+    total_risk = float(st.session_state.df["1日のリスク"].dropna().sum())
+    c4.metric("📈 現在の総リスク", f"{total_risk:.2f}")
+
+    params_changed = (
+        capital      != st.session_state.capital or
+        losscut_mult != st.session_state.losscut_mult or
+        risk_pct     != st.session_state.risk_pct
+    )
+    st.session_state.capital      = capital
+    st.session_state.losscut_mult = losscut_mult
+    st.session_state.risk_pct     = risk_pct
+
+    needs_rerun = False
+    if params_changed:
+        for i in range(n_rows):
+            if recalc_row(i, capital, risk_pct, losscut_mult):
+                needs_rerun = True
+
+    btn1, btn2, _ = st.columns([0.12, 0.12, 0.76])
+    with btn1:
+        if st.button("➕ 行追加", use_container_width=True):
+            add_row(); st.rerun()
+    with btn2:
+        if st.button("💾 保存", use_container_width=True):
+            save_state()
+            st.toast("保存しました ✅", icon="💾")
+
+    st.divider()
+    col_tbl, col_up, col_dn, col_clr, col_del = st.columns([0.81, 0.0475, 0.0475, 0.0475, 0.0475])
+
+    with col_tbl:
+        edited = st.data_editor(
+            st.session_state.df,
+            column_config={
+                "銘柄コード":     st.column_config.TextColumn("銘柄コード",     width="small"),
+                "銘柄名":         st.column_config.TextColumn("銘柄名",         width="medium"),
+                "前日終値":       st.column_config.NumberColumn("前日終値",      format="%.2f",   width="small"),
+                "ATR":            st.column_config.NumberColumn("ATR(20日)",     format="%.2f",   width="small"),
+                "ユニットサイズ": st.column_config.NumberColumn("ユニットサイズ",format="%.1f",   width="small"),
+                "保有株数":       st.column_config.NumberColumn("保有株数",      format="%.0f",   width="small"),
+                "1日のリスク":    st.column_config.NumberColumn("1日のリスク",   format="%.2f",   width="small"),
+                "建玉時株価":     st.column_config.NumberColumn("建玉時株価",    format="%.2f",   width="small"),
+                "売買":           st.column_config.SelectboxColumn("売買", options=["買い","売り"], width="small"),
+                "ロスカットライン": st.column_config.NumberColumn("ロスカットライン", format="%.2f", width="small"),
+                "購入価格(円)":   st.column_config.NumberColumn("購入価格(円)",  format="¥%.0f", width="small"),
+                "購入価格(USD)":  st.column_config.NumberColumn("購入価格(USD)", format="$%.2f", width="small"),
+            },
+            disabled=READONLY_COLS,
+            use_container_width=True,
+            hide_index=True,
+            height=35 * n_rows + 40,
+        )
+
+    spacer = '<div style="height:40px;"></div>'
+    with col_up:
+        st.markdown(spacer, unsafe_allow_html=True)
+        for i in range(n_rows):
+            if st.button("↑", key=f"up_{i}", use_container_width=True, disabled=(i == 0)):
+                move_row(i, -1); st.rerun()
+    with col_dn:
+        st.markdown(spacer, unsafe_allow_html=True)
+        for i in range(n_rows):
+            if st.button("↓", key=f"dn_{i}", use_container_width=True, disabled=(i == n_rows - 1)):
+                move_row(i, 1); st.rerun()
+    with col_clr:
+        st.markdown(spacer, unsafe_allow_html=True)
+        for i in range(n_rows):
+            if st.button("Clear", key=f"clr_{i}", use_container_width=True):
+                clear_row(i); st.rerun()
+    with col_del:
+        st.markdown(spacer, unsafe_allow_html=True)
+        for i in range(n_rows):
+            if st.button("🗑️", key=f"del_{i}", use_container_width=True):
+                delete_row(i); st.rerun()
+
+    for i in range(n_rows):
+        row = edited.iloc[i]
+        st.session_state.df.at[i, "銘柄コード"] = row["銘柄コード"] or ""
+        st.session_state.df.at[i, "保有株数"]   = row["保有株数"]
+        st.session_state.df.at[i, "建玉時株価"] = row["建玉時株価"]
+        st.session_state.df.at[i, "売買"]       = row["売買"] or "買い"
+
+        new_ticker  = normalize_ticker((row["銘柄コード"] or "").strip())
+        prev_ticker = st.session_state.prev_tickers[i]
+
+        if new_ticker != prev_ticker:
+            if new_ticker:
+                with st.spinner(f"🔄 {new_ticker} のデータを取得中..."):
+                    try:
+                        market    = fetch_market_data(new_ticker)
+                        japan     = is_japan_stock(new_ticker)
+                        fx        = 1.0 if japan else fetch_exchange_rate()
+                        st.session_state.fx_rates[i] = fx
+
+                        name      = get_ticker_name(new_ticker)
+                        unit_size = calc_unit_size(capital, risk_pct, market.atr, japan, fx)
+                        entry     = _floor_jp(round(market.close, 2), japan)
+                        losscut   = calc_losscut(entry, market.atr, losscut_mult, True, japan)
+
+                        for k, v in {
+                            "銘柄コード":       new_ticker, "銘柄名": name,
+                            "前日終値":         entry, "ATR": market.atr,
+                            "ユニットサイズ":   unit_size if unit_size is not None else NAN,
+                            "建玉時株価":       entry, "1日のリスク": NAN,
+                            "ロスカットライン": losscut if losscut is not None else NAN,
+                            "購入価格(円)": NAN, "購入価格(USD)": NAN,
+                        }.items():
+                            st.session_state.df.at[i, k] = v
+                    except Exception as e:
+                        st.error(f"行{i + 1} [{new_ticker}] データ取得失敗 → {e}")
+            else:
+                for k, v in empty_row().items():
+                    st.session_state.df.at[i, k] = v
+                st.session_state.fx_rates[i] = 1.0
+
+            st.session_state.prev_tickers[i] = new_ticker
+            needs_rerun = True
+        elif new_ticker:
+            if recalc_row(i, capital, risk_pct, losscut_mult):
+                needs_rerun = True
+
+    if needs_rerun:
+        st.rerun()
+
+
+def render_screener_tab() -> None:
+    st.title("🔍 スクリーニング")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ① 銘柄マスタ取得（手動）
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🗂️ 銘柄マスタ取得")
+    st.caption(
+        "「銘柄マスタ更新」ボタンを押すとJPX公式データを取得します。"
+        "CSVは**自動更新されません**。"
+    )
+
+    upd_col, info_col = st.columns([0.25, 0.75])
+    with upd_col:
+        if st.button("🔄 銘柄マスタ更新", use_container_width=True, key="jpx_update_btn"):
+            with st.spinner("JPX公式データを取得中..."):
+                try:
+                    master = load_jpx_data()
+                    topix  = load_topix_detail()
+
+                    master = master.merge(topix, on="code", how="left")
+                    master["topix_flag"] = master["topix_flag"].fillna(False)
+                    master["topix_size"] = master["topix_size"].fillna("None")
+
+                    st.session_state.master      = master
+                    st.session_state.last_update = pd.Timestamp.now()
+                    # ページリロード後も保持できるようファイルに永続化
+                    import pickle as _pkl
+                    with open(MASTER_FILE, "wb") as _f:
+                        _pkl.dump({
+                            "master":      master,
+                            "last_update": st.session_state.last_update,
+                        }, _f)
+                    st.success(f"✅ 更新完了（{len(master):,} 銘柄）")
+                except Exception as e:
+                    st.error(f"❌ 更新失敗: {e}")
+
+    with info_col:
+        if st.session_state.last_update is not None and st.session_state.master is not None:
+            ts  = st.session_state.last_update.strftime("%Y-%m-%d %H:%M:%S")
+            cnt = len(st.session_state.master)
+            st.info(f"最終更新日時: **{ts}** ／ 銘柄数: **{cnt:,}**")
+        else:
+            st.warning("銘柄マスタは未更新です。")
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ② フィルター設定
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### ⚙️ フィルター設定")
+
+    fc1, fc2 = st.columns(2)
+    with fc1:
+        market_options = st.multiselect(
+            "📌 市場",
+            options=["プライム", "スタンダード", "グロース"],
+            default=["プライム", "スタンダード", "グロース"],
+            key="sc_market_options",
+        )
+
+        # 33業種区分フィルター（マスタから動的に取得）
+        _all_industries = sorted(
+            st.session_state.master["industry"].dropna().unique().tolist()
+            if st.session_state.master is not None and "industry" in st.session_state.master.columns
+            else []
+        )
+        industry_options = st.multiselect(
+            "🏭 33業種区分",
+            options=_all_industries,
+            default=_all_industries,
+            key="sc_industry_options",
+            placeholder="全業種（指定なし）",
+        )
+
+    with fc2:
+        topix_only = st.checkbox("TOPIX採用のみ", value=False, key="sc_topix_only")
+
+        # TOPIX指数プリセットボタン
+        _TOPIX_PRESETS = {
+            "TOPIX100":  ["Core30", "Large70"],
+            "TOPIX500":  ["Core30", "Large70", "Mid400"],
+            "TOPIX1000": ["Core30", "Large70", "Mid400", "Small1"],
+        }
+        _btn_cols = st.columns(3)
+        for _col, (_label, _sizes) in zip(_btn_cols, _TOPIX_PRESETS.items()):
+            with _col:
+                if st.button(_label, key=f"sc_topix_preset_{_label}", use_container_width=True):
+                    st.session_state["sc_topix_size"] = _sizes
+
+        topix_size_options = st.multiselect(
+            "📊 TOPIX区分",
+            options=["Core30", "Large70", "Mid400", "Small1", "Small2", "None"],
+            default=["Core30", "Large70", "Mid400", "Small1", "Small2", "None"],
+            key="sc_topix_size",
+        )
+
+    # フィルター適用 + 銘柄コードリスト生成
+    _filtered_tickers: list[str] = []
+    _filtered_count   = 0
+    if st.session_state.master is not None:
+        _df = st.session_state.master.copy()
+
+        if market_options:
+            _df = _df[_df["market"].str.contains("|".join(market_options), na=False)]
+
+        # 33業種区分フィルター（全選択 or 未選択なら絞り込まない）
+        if industry_options and len(industry_options) < len(_all_industries):
+            if "industry" in _df.columns:
+                _df = _df[_df["industry"].isin(industry_options)]
+
+        if topix_only:
+            _df = _df[_df["topix_flag"] == True]
+
+        if topix_size_options and "topix_size" in _df.columns:
+            _df = _df[_df["topix_size"].isin(topix_size_options)]
+
+        _filtered_tickers = _df["code"].dropna().tolist()
+        _filtered_count   = len(_filtered_tickers)
+        st.caption(f"フィルター後銘柄数: **{_filtered_count:,}** 件")
+    else:
+        st.caption("銘柄マスタ未取得 — マスタ更新後にフィルターが有効になります")
+
+    # フィルター設定の保存ボタン
+    _fsave_col, _fload_info_col = st.columns([0.2, 0.8])
+    with _fsave_col:
+        if st.button("💾 フィルター設定を保存", key="sc_filter_save_btn", use_container_width=True):
+            try:
+                _filter_data = {
+                    _fk: st.session_state.get(_fk)
+                    for _fk in _FILTER_KEYS
+                }
+                with open(FILTER_FILE, "w", encoding="utf-8") as _ff:
+                    json.dump(_filter_data, _ff, ensure_ascii=False)
+                st.toast("✅ フィルター設定を保存しました", icon="💾")
+            except Exception as _e:
+                st.error(f"保存失敗: {_e}")
+    with _fload_info_col:
+        if os.path.exists(FILTER_FILE):
+            try:
+                _mtime = pd.Timestamp(os.path.getmtime(FILTER_FILE), unit="s", tz="Asia/Tokyo")
+                st.caption(f"最終保存: {_mtime.strftime('%Y-%m-%d %H:%M:%S')}")
+            except Exception:
+                pass
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ③ スクリーニング実行
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🔍 ブレイクアウトスクリーニング")
+    st.markdown("""
+    ドンチャンブレイクアウトを検知し、**時間フィルター**と**待機DDフィルター**で
+    ダマシを除外した高精度スクリーニングを実行します。
+    - ⏱️ **時間フィルター**: ブレイク後N日待機し、価格がまだブレイク水準以上なら採用
+    - 🛡️ **待機DDフィルター**: 待機期間中の最大下落が許容範囲内の銘柄のみ採用
+    - 🔥 **出来高条件**: ブレイク日の出来高がN日平均の指定倍率以上
+    """)
+    st.divider()
+
+    # ────────────────────────────────────────────────────────────────────────
+    # スクリーニングパラメータ設定
+    # ────────────────────────────────────────────────────────────────────────
+    st.markdown("### ⚙️ スクリーニングパラメータ")
+    p1, p2, p3, p4 = st.columns(4)
+
+    with p1:
+        sc_donchian = st.number_input(
+            "📅 ドンチャン期間（日）",
+            min_value=5, max_value=60, value=20, step=1,
+            help="N日高値上抜けを判定する期間",
+            key="sc_donchian",
+        )
+
+    with p2:
+        sc_delay = st.selectbox(
+            "⏱️ 遅延日数（delay_days）",
+            options=[0, 3, 5, 10, 20],
+            index=2,
+            format_func=lambda x: f"{x}日" if x > 0 else "即時（0日）",
+            key="sc_delay",
+            help="ブレイク後この日数が経過してから条件チェック",
+        )
+
+    with p3:
+        sc_dd = st.selectbox(
+            "🛡️ 待機DD閾値（%）",
+            options=[-1.5, -2.0, -2.5, -3.0],
+            index=3,
+            format_func=lambda x: f"{x:.1f}%",
+            key="sc_dd",
+            help="待機期間中の最大下落率の下限（例: -3.0% → 3%超の下落はNG）",
+        )
+
+    with p4:
+        sc_vol = st.slider(
+            "🔥 出来高倍率 閾値",
+            min_value=1.0, max_value=5.0, value=1.5, step=0.1,
+            format="%.1f×",
+            key="sc_vol",
+            help="ブレイク日出来高 ÷ N日平均出来高 がこの値以上の銘柄のみ通過",
+        )
+
+    st.caption(
+        f"📌 判定条件: ドンチャン{sc_donchian}日 ｜ "
+        f"遅延{sc_delay}日後に価格確認 ｜ "
+        f"待機DD > {sc_dd:.1f}% ｜ "
+        f"出来高 ≥ {sc_vol:.1f}×"
+    )
+
+    # ────────────────────────────────────────────────────────────────────────
+    # 銘柄リスト（マスタフィルター結果 / プリセット / CSV / 手動入力）
+    # ────────────────────────────────────────────────────────────────────────
+    st.markdown("### 📋 銘柄リスト")
+
+    # 銘柄マスタのフィルター結果を反映ボタン
+    if _filtered_count > 0:
+        if st.button(
+            f"📥 フィルター結果を反映（{_filtered_count:,} 銘柄）",
+            key="sc_import_master",
+            help="上記フィルター後の銘柄をテキストエリアに一括反映します",
+        ):
+            _codes = ", ".join(_filtered_tickers)
+            st.session_state.sc_ticker_input = _codes
+            st.session_state.sc_ticker_area  = _codes
+            st.success(f"✅ {_filtered_count:,} 銘柄を反映しました")
+
+    sc_preset_col, sc_csv_col = st.columns([0.45, 0.55])
+
+    with sc_preset_col:
+        sc_preset = st.selectbox(
+            "入力方法 / プリセット",
+            options=PRESET_OPTIONS,
+            key="sc_preset_select",
+        )
+
+    if sc_preset != st.session_state.sc_prev_preset:
+        if sc_preset == PRESET_OPTIONS[1]:
+            _ps = ", ".join(TOPIX100_TICKERS)
+            st.session_state.sc_ticker_input = _ps
+            st.session_state.sc_ticker_area  = _ps
+        elif sc_preset == PRESET_OPTIONS[2]:
+            _ps = ", ".join(NIKKEI225_TICKERS)
+            st.session_state.sc_ticker_input = _ps
+            st.session_state.sc_ticker_area  = _ps
+        st.session_state.sc_prev_preset = sc_preset
+
+    with sc_csv_col:
+        sc_uploaded = st.file_uploader(
+            "📂 銘柄CSVをアップロード",
+            type=["csv"],
+            key="sc_csv_uploader",
+            help=(
+                "ticker 列（例: 7203.T）または code 列（例: 7203）を含む CSV。\n"
+                "アップロードするとテキストエリアの内容を自動置換します。"
+            ),
+        )
+
+    if sc_uploaded is not None:
+        sc_file_id = getattr(sc_uploaded, "file_id", sc_uploaded.name)
+        if st.session_state.sc_csv_file_id != sc_file_id:
+            st.session_state.sc_csv_file_id = sc_file_id
+            csv_tickers, csv_err = _parse_screener_csv(sc_uploaded)
+            if csv_err:
+                st.error(f"❌ {csv_err}")
+            else:
+                ticker_str = ", ".join(csv_tickers)
+                st.session_state.sc_ticker_input = ticker_str
+                st.session_state.sc_ticker_area  = ticker_str
+                st.success(
+                    f"✅ CSV 読み込み成功 — **{len(csv_tickers)} 銘柄**をテキストエリアに反映しました。"
+                )
+
+    sc_ticker_input = st.text_area(
+        "銘柄コード（カンマ区切り）",
+        height=80,
+        key="sc_ticker_area",
+        label_visibility="collapsed",
+        help="4桁数字も可（7203 → 7203.T に自動変換）。マスタ反映後は手動編集も可能。",
+    )
+    if sc_preset == PRESET_OPTIONS[0] and sc_uploaded is None:
+        st.session_state.sc_ticker_input = sc_ticker_input
+
+    raw_list = [t.strip() for t in sc_ticker_input.split(",") if t.strip()]
+    st.caption(f"銘柄数: **{len(raw_list)}** 件")
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ③ 実行 / クリア ボタン
+    # ────────────────────────────────────────────────────────────────────────
+    run_col, clr_col, _ = st.columns([0.22, 0.10, 0.68])
+    with run_col:
+        run_btn = st.button(
+            "🚀 スクリーニング実行", use_container_width=True,
+            type="primary", key="sc_run_btn",
+        )
+    with clr_col:
+        if st.button("クリア", use_container_width=True, key="sc_clr_btn"):
+            st.session_state.screener_results = None
+            st.rerun()
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ④ スクリーニング実行
+    # ────────────────────────────────────────────────────────────────────────
+    if run_btn:
+        if not raw_list:
+            st.warning("銘柄コードを入力してください。")
+        else:
+            tickers = [normalize_ticker(t) for t in raw_list if t]
+            passed:  list[dict] = []
+            errors:  list[str]  = []
+
+            prog_bar  = st.progress(0, text=f"スクリーニング開始... (0 / {len(tickers)})")
+            status_ph = st.empty()
+
+            for idx, ticker in enumerate(tickers):
+                prog_bar.progress(
+                    idx / len(tickers),
+                    text=f"処理中... {idx + 1} / {len(tickers)} | 通過: {len(passed)} 銘柄",
+                )
+                status_ph.caption(f"🔍 {ticker} を分析中")
+
+                result, err = screen_ticker(
+                    ticker        = ticker,
+                    donchian_days = int(sc_donchian),
+                    vol_mult_thr  = float(sc_vol),
+                    delay_days    = int(sc_delay),
+                    dd_threshold  = float(sc_dd),
+                )
+
+                if result:
+                    passed.append(result)
+                elif err:
+                    errors.append(f"{ticker}: {err}")
+
+            prog_bar.progress(
+                1.0,
+                text=f"✅ 完了  {len(passed)} / {len(tickers)} 銘柄が条件を通過",
+            )
+            status_ph.empty()
+
+            if passed:
+                _master_name_map = {}
+                if st.session_state.master is not None and "name" in st.session_state.master.columns:
+                    _master_name_map = dict(zip(
+                        st.session_state.master["code"].astype(str),
+                        st.session_state.master["name"]
+                    ))
+                for row in passed:
+                    row["銘柄名"] = _master_name_map.get(str(row["ティッカー"])) or _get_stock_name(row["ティッカー"])
+
+            st.session_state.screener_results = (
+                pd.DataFrame(passed) if passed else pd.DataFrame()
+            )
+
+            if errors:
+                with st.expander(f"⚠️ スキップされた銘柄 ({len(errors)} 件)"):
+                    for e in errors:
+                        st.caption(e)
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ⑤ 結果表示
+    # ────────────────────────────────────────────────────────────────────────
+    if st.session_state.screener_results is None:
+        return
+
+    results_df = st.session_state.screener_results
+    st.divider()
+
+    if results_df.empty:
+        st.info(
+            "🔍 条件を満たす銘柄は見つかりませんでした。"
+            "遅延日数を減らすか、DD閾値・出来高倍率を緩めてみてください。"
+        )
+        return
+
+    st.success(f"✅ **{len(results_df)} 銘柄**が条件を通過しました")
+
+    # ── 一括ファンダ追加ボタン ─────────────────────────────────────────────
+    _all_codes   = results_df["ティッカー"].dropna().tolist() if "ティッカー" in results_df.columns else []
+    _not_added   = [c for c in _all_codes if c not in st.session_state.funda_list]
+    if _not_added:
+        if st.button(f"📊 全 {len(_not_added)} 銘柄を一括でファンダ一覧に追加", key="sc_bulk_funda_add"):
+            with st.spinner(f"{len(_not_added)} 銘柄のデータを取得中..."):
+                for _bc in _not_added:
+                    _bf = get_fundamentals(_bc)
+                    st.session_state.fund_df = pd.concat(
+                        [st.session_state.fund_df, pd.DataFrame([_bf])],
+                        ignore_index=True,
+                    ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
+                    if _bc not in st.session_state.funda_list:
+                        st.session_state.funda_list.append(_bc)
+            save_funda_data(st.session_state.fund_df)
+            st.success(f"✅ {len(_not_added)} 銘柄を追加しました")
+            st.rerun()
+    else:
+        st.info("スクリーニング結果の全銘柄が既にファンダ一覧に追加済みです。")
+
+    col_order = [
+        "ティッカー", "銘柄名", "現在価格",
+        "経過日数", "ブレイク比(%)",
+        "出来高倍率", "waiting_dd(%)", "delay日数",
+        "ブレイク日", "ブレイク価格", "エントリー価格",
+    ]
+    disp_df = results_df[[c for c in col_order if c in results_df.columns]].copy()
+
+    def _dd_color(val):
+        try:
+            v = float(val)
+            return "color: #f44336; font-weight:bold" if v < -1.5 else "color: #4caf50"
+        except Exception:
+            return ""
+
+    def _pct_color(val):
+        try:
+            v = float(val)
+            return "color: #4caf50; font-weight:bold" if v >= 0 else "color: #f44336; font-weight:bold"
+        except Exception:
+            return ""
+
+    fmt_map = {
+        "現在価格":      "{:,.2f}",
+        "経過日数":      "{:.0f}日",
+        "ブレイク比(%)": "{:+.2f}%",
+        "出来高倍率":    "{:.2f}×",
+        "waiting_dd(%)": "{:+.2f}%",
+        "ブレイク価格":  "{:,.2f}",
+        "エントリー価格":"{:,.2f}",
+    }
+    fmt_map = {k: v for k, v in fmt_map.items() if k in disp_df.columns}
+
+    # ── スクリーニング結果テーブル（ファンダ追加ボタン付き）─────────────────────────
+    _SC_LABELS = ["ティッカー", "銘柄名", "現在価格", "経過日数", "ブレイク比(%)",
+                  "出来高倍率", "waiting_dd(%)", "delay日数", "ブレイク日", "ブレイク価格", "エントリー価格",
+                  "かぶたん", "理論株価", "チャート", "＋"]
+    _SC_WIDTHS = [0.7, 1.2, 0.8, 0.6, 0.8, 0.7, 0.8, 0.5, 0.8, 0.8, 0.9, 0.7, 0.7, 0.6, 0.5]
+    _sc_hdr = st.columns(_SC_WIDTHS)
+    for _hc, _lbl in zip(_sc_hdr, _SC_LABELS):
+        _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
+
+    for _, _row in disp_df.iterrows():
+        _rc   = st.columns(_SC_WIDTHS)
+        _code = str(_row.get("ティッカー", ""))
+        _in_list = _code in st.session_state.funda_list
+
+        _rc[0].write(_row.get("ティッカー", "—"))
+        _rc[1].write(_row.get("銘柄名", "—"))
+
+        _v = _row.get("現在価格")
+        _rc[2].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
+
+        _v = _row.get("経過日数")
+        _rc[3].write(f"{int(_v)}日" if pd.notna(_v) else "—")
+
+        _v = _row.get("ブレイク比(%)")
+        if pd.notna(_v):
+            _clr = "#4caf50" if _v >= 0 else "#f44336"
+            _rc[4].markdown(
+                f'<span style="color:{_clr};font-weight:bold">{_v:+.2f}%</span>',
+                unsafe_allow_html=True,
+            )
+        else:
+            _rc[4].write("—")
+
+        _v = _row.get("出来高倍率")
+        _rc[5].write(f"{_v:.2f}×" if pd.notna(_v) else "—")
+
+        _v = _row.get("waiting_dd(%)")
+        if pd.notna(_v):
+            _clr = "#f44336" if _v < -1.5 else "#4caf50"
+            _rc[6].markdown(
+                f'<span style="color:{_clr};font-weight:bold">{_v:+.2f}%</span>',
+                unsafe_allow_html=True,
+            )
+        else:
+            _rc[6].write("—")
+
+        _v = _row.get("delay日数")
+        _rc[7].write(f"{int(_v)}" if pd.notna(_v) else "—")
+
+        _rc[8].write(str(_row.get("ブレイク日", "—")))
+
+        _v = _row.get("ブレイク価格")
+        _rc[9].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
+
+        _v = _row.get("エントリー価格")
+        _rc[10].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
+
+        # 銘柄コード（4桁）を取得
+        _sc_clean = _code.replace(".T", "").replace(".t", "")
+
+        # かぶたん
+        with _rc[11]:
+            st.link_button("かぶたん", f"https://kabutan.jp/stock/news?code={_sc_clean}")
+
+        # 理論株価
+        with _rc[12]:
+            st.link_button("理論株価", f"https://kabubiz.com/riron/stock.php?c={_sc_clean}")
+
+        # TradingView チャート
+        with _rc[13]:
+            st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_sc_clean}")
+
+        # ファンダ追加
+        with _rc[14]:
+            if _in_list:
+                st.success("✅", icon=None)
+            else:
+                if st.button("＋", key=f"funda_{_code}"):
+                    with st.spinner(f"{_code} のデータを取得中..."):
+                        _fdata = get_fundamentals(_code)
+                    st.session_state.fund_df = pd.concat(
+                        [st.session_state.fund_df, pd.DataFrame([_fdata])],
+                        ignore_index=True,
+                    ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
+                    save_funda_data(st.session_state.fund_df)
+                    if _code not in st.session_state.funda_list:
+                        st.session_state.funda_list.append(_code)
+                    st.rerun()
+
+    st.download_button(
+        label="📥 CSV ダウンロード",
+        data=disp_df.to_csv(index=False, encoding="utf-8-sig"),
+        file_name="screening_result.csv",
+        mime="text/csv",
+        key="sc_csv_download",
+    )
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ⑥ ポジションサイズ計算
+    # ────────────────────────────────────────────────────────────────────────
+    st.divider()
+    st.markdown("### 💰 ポジションサイズ計算")
+    st.caption("スクリーニング通過銘柄のポジションサイズを一括計算します。")
+
+    ps1, ps2, ps3 = st.columns(3)
+    with ps1:
+        ps_capital = st.number_input(
+            "💴 総資金（円）",
+            min_value=100_000, max_value=1_000_000_000,
+            value=1_000_000, step=100_000, format="%d",
+            key="sc_ps_capital",
+        )
+    with ps2:
+        ps_risk_pct = st.slider(
+            "📊 リスク率（%）",
+            min_value=0.5, max_value=3.0, value=1.0, step=0.1,
+            format="%.1f%%",
+            key="sc_ps_risk",
+        )
+    with ps3:
+        ps_loss_pct = st.number_input(
+            "✂️ 損切り幅（%）",
+            min_value=0.5, max_value=20.0, value=5.0, step=0.5, format="%.1f",
+            key="sc_ps_loss",
+            help="エントリー価格からの損切り率（例: 5.0 → 5%下落で損切り）",
+        )
+
+    if "エントリー価格" in disp_df.columns:
+        pos_rows = []
+        for _, row in disp_df.iterrows():
+            ticker      = row["ティッカー"]
+            name        = row.get("銘柄名", ticker)
+            entry_price = float(row["エントリー価格"])
+            losscut     = entry_price * (1 - ps_loss_pct / 100)
+            risk_per_sh = entry_price - losscut
+            if risk_per_sh > 0:
+                budget   = ps_capital * (ps_risk_pct / 100)
+                shares   = int(budget / risk_per_sh)
+                purchase = shares * entry_price
+            else:
+                shares   = 0
+                purchase = 0.0
+
+            pos_rows.append({
+                "ティッカー":     ticker,
+                "銘柄名":         name,
+                "エントリー価格": round(entry_price, 2),
+                "損切り価格":     round(losscut, 2),
+                "推奨株数":       shares,
+                "購入総額（円）": round(purchase, 0),
+            })
+
+        if pos_rows:
+            pos_df = pd.DataFrame(pos_rows)
+            st.dataframe(
+                pos_df.style.format({
+                    "エントリー価格": "{:,.2f}",
+                    "損切り価格":     "{:,.2f}",
+                    "購入総額（円）": "¥{:,.0f}",
+                }),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.divider()
+    st.markdown("#### ➕ ポジション計算タブへ追加")
+    if st.button(
+        "📋 通過銘柄を全てポジション計算タブへ追加",
+        type="secondary", key="sc_add_to_pos",
+    ):
+        added = 0
+        for _, r in results_df.iterrows():
+            ticker = r["ティッカー"]
+            target = next(
+                (i for i in range(st.session_state.n_rows)
+                 if not st.session_state.df.at[i, "銘柄コード"]),
+                None,
+            )
+            if target is None:
+                add_row()
+                target = st.session_state.n_rows - 1
+            st.session_state.df.at[target, "銘柄コード"]   = ticker
+            st.session_state.prev_tickers[target] = "__FORCE_FETCH__"
+            added += 1
+        st.toast(f"{added} 銘柄を追加しました。ポジション計算タブをご確認ください。", icon="✅")
+        st.rerun()
+
+
+# ===========================================================================
+# ファンダ分析: データ取得 / 保存 / 読み込み
+# ===========================================================================
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_fundamentals(code: str) -> dict:
+    """yfinance から現在価格・前日比を取得する（1hキャッシュ）"""
+    try:
+        info = yf.Ticker(code).info
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice")
+        prev_close    = info.get("regularMarketPreviousClose")
+        if current_price and prev_close and prev_close != 0:
+            day_change_pct = (current_price - prev_close) / prev_close * 100
+        else:
+            day_change_pct = None
+        return {
+            "code":           code,
+            "current_price":  current_price,
+            "day_change_pct": day_change_pct,
+        }
+    except Exception as e:
+        return {"code": code, "error": str(e)}
+
+
+def save_funda_data(df: pd.DataFrame) -> None:
+    """ファンダデータを CSV に保存する"""
+    df.to_csv(FUNDA_FILE, index=False, encoding="utf-8-sig")
+
+
+def load_funda_data() -> pd.DataFrame:
+    """CSV からファンダデータを読み込む。ファイルがなければ空 DataFrame を返す"""
+    try:
+        return pd.read_csv(FUNDA_FILE, encoding="utf-8-sig", dtype=str)
+    except Exception:
+        return pd.DataFrame()
+
+
+def save_memo_data(memos: dict) -> None:
+    """メモデータを JSON に保存する"""
+    with open(MEMO_FILE, "w", encoding="utf-8") as _mf:
+        json.dump(memos, _mf, ensure_ascii=False, indent=2)
+
+
+def load_memo_data() -> dict:
+    """JSON からメモデータを読み込む"""
+    try:
+        with open(MEMO_FILE, encoding="utf-8") as _mf:
+            return json.load(_mf)
+    except Exception:
+        return {}
+
+
+# ===========================================================================
+# ファンダ分析タブ
+# ===========================================================================
+
+def render_funda_tab() -> None:
+    st.title("👀 監視銘柄")
+    st.caption("銘柄を追加すると現在価格・前日比を自動取得します。データは CSV に自動保存されます。")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ① スクリーニング結果から追加
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 🔍 スクリーニング結果から追加")
+
+    _sc_res = st.session_state.get("screener_results")
+    _sc_codes: list[str] = []
+    if _sc_res is not None and not _sc_res.empty and "ティッカー" in _sc_res.columns:
+        _sc_codes = _sc_res["ティッカー"].dropna().unique().tolist()
+
+    if _sc_codes:
+        selected_codes = st.multiselect(
+            "追加する銘柄を選択",
+            options=_sc_codes,
+            default=[c for c in st.session_state.funda_list if c in _sc_codes],
+            key="funda_sc_select",
+        )
+        if st.button("➕ 追加実行", key="funda_sc_add_btn", type="primary"):
+            if selected_codes:
+                with st.spinner(f"{len(selected_codes)} 銘柄のファンダデータを取得中..."):
+                    new_rows = []
+                    for _c in selected_codes:
+                        new_rows.append(get_fundamentals(_c))
+                df_new = pd.DataFrame(new_rows)
+                st.session_state.fund_df = pd.concat(
+                    [st.session_state.fund_df, df_new], ignore_index=True
+                ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
+                save_funda_data(st.session_state.fund_df)
+                # funda_list も同期
+                for _c in selected_codes:
+                    if _c not in st.session_state.funda_list:
+                        st.session_state.funda_list.append(_c)
+                st.success(f"✅ {len(selected_codes)} 銘柄を追加しました")
+                st.rerun()
+            else:
+                st.warning("銘柄を選択してください。")
+    else:
+        st.info("スクリーニングタブでスクリーニングを実行すると、ここに結果が表示されます。")
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ② 手動追加
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### ✍️ 手動追加")
+
+    _m_col1, _m_col2 = st.columns([0.4, 0.6])
+    with _m_col1:
+        manual_code = st.text_input(
+            "銘柄コード（例: 7203.T）",
+            key="funda_manual_input",
+            placeholder="7203.T",
+        )
+    with _m_col2:
+        st.write("")
+        st.write("")
+        if st.button("➕ 追加", key="funda_manual_add_btn"):
+            _code = normalize_ticker(manual_code.strip())
+            if _code:
+                with st.spinner(f"{_code} のデータを取得中..."):
+                    _data = get_fundamentals(_code)
+                _df_new = pd.DataFrame([_data])
+                st.session_state.fund_df = pd.concat(
+                    [st.session_state.fund_df, _df_new], ignore_index=True
+                ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
+                save_funda_data(st.session_state.fund_df)
+                if _code not in st.session_state.funda_list:
+                    st.session_state.funda_list.append(_code)
+                st.success(f"✅ {_code} を追加しました")
+                st.rerun()
+            else:
+                st.warning("銘柄コードを入力してください。")
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ③ ファンダ一覧表示
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 📋 ファンダ一覧")
+
+    fund_df = st.session_state.fund_df
+
+    if fund_df.empty:
+        st.info("まだ銘柄が登録されていません。上のセクションから追加してください。")
+        return
+
+    # 表示用に列名を日本語化
+    _COL_RENAME = {
+        "code":           "コード",
+        "current_price":  "現在価格",
+        "day_change_pct": "前日比(%)",
+        "error":          "エラー",
+    }
+    disp_df = fund_df.rename(columns={k: v for k, v in _COL_RENAME.items() if k in fund_df.columns}).copy()
+
+    # 数値列を numeric に変換
+    for _col in ["現在価格", "前日比(%)"]:
+        if _col in disp_df.columns:
+            disp_df[_col] = pd.to_numeric(disp_df[_col], errors="coerce")
+
+    # マスタから銘柄名マップを作成（日本語名）
+    _funda_name_map = {}
+    if st.session_state.master is not None and "name" in st.session_state.master.columns:
+        _funda_name_map = dict(zip(
+            st.session_state.master["code"].astype(str),
+            st.session_state.master["name"]
+        ))
+
+    # ── テーブルヘッダー ─────────────────────────────────────────────────
+    _FUNDA_LABELS = ["コード", "銘柄名", "現在価格", "前日比(%)",
+                     "かぶたん", "理論株価", "チャート", "メモ", "削除"]
+    _FUNDA_WIDTHS = [0.8, 1.8, 1.0, 0.9, 0.8, 0.8, 0.7, 0.6, 0.6]
+    _hdr_cs = st.columns(_FUNDA_WIDTHS)
+    for _hc, _lbl in zip(_hdr_cs, _FUNDA_LABELS):
+        _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
+
+    for _, _row in disp_df.iterrows():
+        _rc = st.columns(_FUNDA_WIDTHS)
+
+        # コード・銘柄名
+        _code_raw     = str(_row.get("コード", ""))
+        _ticker_clean = _code_raw.replace(".T", "").replace(".t", "")
+        _jp_name      = _funda_name_map.get(_ticker_clean) or _funda_name_map.get(_code_raw) or "—"
+        _rc[0].write(_code_raw)
+        _rc[1].write(_jp_name)
+
+        # 現在価格
+        _v = _row.get("現在価格")
+        _rc[2].write(f"{float(_v):,.2f}" if pd.notna(_v) else "—")
+
+        # 前日比(%)（正負カラー）
+        _v = _row.get("前日比(%)")
+        if pd.notna(_v):
+            _fv = float(_v)
+            _clr = "#4caf50" if _fv >= 0 else "#f44336"
+            _rc[3].markdown(
+                f'<span style="color:{_clr};font-weight:bold">{_fv:+.2f}%</span>',
+                unsafe_allow_html=True,
+            )
+        else:
+            _rc[3].write("—")
+
+        # かぶたん
+        with _rc[4]:
+            st.link_button("かぶたん", f"https://kabutan.jp/stock/news?code={_ticker_clean}")
+
+        # 理論株価
+        with _rc[5]:
+            st.link_button("理論株価", f"https://kabubiz.com/riron/stock.php?c={_ticker_clean}")
+
+        # TradingView チャート
+        with _rc[6]:
+            st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_ticker_clean}")
+
+        # メモ開閉ボタン
+        with _rc[7]:
+            _memo_key = f"memo_open_{_code_raw}"
+            if st.button("📝", key=f"memo_btn_{_code_raw}"):
+                st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
+
+        # 削除ボタン
+        with _rc[8]:
+            if st.button("🗑️", key=f"del_funda_{_code_raw}"):
+                st.session_state.fund_df = st.session_state.fund_df[
+                    st.session_state.fund_df["code"] != _code_raw
+                ].reset_index(drop=True)
+                save_funda_data(st.session_state.fund_df)
+                if _code_raw in st.session_state.funda_list:
+                    st.session_state.funda_list.remove(_code_raw)
+                if _code_raw in st.session_state.funda_memos:
+                    del st.session_state.funda_memos[_code_raw]
+                    save_memo_data(st.session_state.funda_memos)
+                st.rerun()
+
+        # メモ展開エリア（📝ボタンで開閉）
+        if st.session_state.get(f"memo_open_{_code_raw}", False):
+            _current_memo = st.session_state.funda_memos.get(_code_raw, "")
+            _new_memo = st.text_area(
+                f"📝 {_jp_name}（{_code_raw}）のメモ",
+                value=_current_memo,
+                key=f"memo_text_{_code_raw}",
+                height=80,
+                label_visibility="visible",
+            )
+            if st.button("💾 保存", key=f"memo_save_{_code_raw}"):
+                st.session_state.funda_memos[_code_raw] = _new_memo
+                save_memo_data(st.session_state.funda_memos)
+                st.success("✅ メモを保存しました")
+
+    # ダウンロード + 削除操作
+    dl_col, ref_col, clr_col = st.columns([0.25, 0.25, 0.5])
+    with dl_col:
+        st.download_button(
+            label="📥 CSV ダウンロード",
+            data=fund_df.to_csv(index=False, encoding="utf-8-sig"),
+            file_name="fundamental_list.csv",
+            mime="text/csv",
+            key="funda_dl_btn",
+        )
+    with ref_col:
+        if st.button("🔄 データを再取得", key="funda_refresh_btn"):
+            get_fundamentals.clear()
+            codes = fund_df["code"].dropna().tolist() if "code" in fund_df.columns else []
+            with st.spinner(f"{len(codes)} 銘柄を再取得中..."):
+                new_rows = [get_fundamentals(c) for c in codes]
+            st.session_state.fund_df = pd.DataFrame(new_rows)
+            save_funda_data(st.session_state.fund_df)
+            st.success("✅ 再取得完了")
+            st.rerun()
+
+
+
+# ===========================================================================
+# バックテスト: 1銘柄シミュレーション
+# ===========================================================================
+
+def backtest_ticker(
+    ticker:            str,
+    period_years:      int,
+    donchian_days:     int  = 20,
+    ema_fast:          int  = 5,
+    ema_slow:          int  = 20,
+    use_5day_lookback: bool = False,
+) -> tuple[list[dict], str | None]:
+    """
+    ドンチャンブレイクアウト + EMAクロス EXIT 戦略のバックテスト（1銘柄）。
+
+    エントリー条件:
+        - Close > donchian_series (shift(1)使用 — 当日を含まない前N日の高値最大)
+        - use_5day_lookback=True の場合、過去5日以内のブレイクシグナルも有効
+
+    決済条件（ATR損切りは一切使用しない）:
+        - EMA(fast) < EMA(slow)  →  デッドクロス発生日の終値で決済
+        - データ終端まで未決済   →  最終日の終値で決済
+
+    Args:
+        ticker:            ティッカーシンボル
+        period_years:      バックテスト期間（年）
+        donchian_days:     ドンチャンチャネル期間（日）
+        ema_fast:          短期 EMA の期間（デフォルト: 5）
+        ema_slow:          長期 EMA の期間（デフォルト: 20）
+        use_5day_lookback: True のとき過去5日以内のブレイクも有効
+
+    Returns:
+        (trades_list, error_message)
+    """
+    LOOKBACK   = 5 if use_5day_lookback else 1
+    PERIOD_MAP = {1: "1y", 3: "3y", 5: "5y"}
+    period_str = PERIOD_MAP.get(period_years, "1y")
+
+    try:
+        df = yf.download(ticker, period=period_str, progress=False, auto_adjust=True)
+
+        if df.empty:
+            return [], "データなし"
+
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # donchian + lookback + EMA 収束バッファ
+        min_rows = max(donchian_days + LOOKBACK + 2, ema_slow + 10)
+        if len(df) < min_rows:
+            return [], f"データ不足（{len(df)}日）"
+
+        # ── テクニカル指標を事前計算 ─────────────────────────────────────
+        # ドンチャン: shift(1) で当日を含まない前N日の高値最大
+        donchian_s = df["High"].rolling(donchian_days).max().shift(1)
+
+        # 出来高移動平均（スコア用）
+        avg_vol_s  = df["Volume"].rolling(donchian_days).mean().shift(1)
+
+        # EMA クロス（決済判定）— pandas ewm を使用
+        ema_fast_s = df["Close"].ewm(span=ema_fast,  adjust=False).mean()
+        ema_slow_s = df["Close"].ewm(span=ema_slow,  adjust=False).mean()
+
+        # スコア構成要素用
+        ma25_s = df["Close"].rolling(25).mean()
+        ma75_s = df["Close"].rolling(75).mean()
+
+        # numpy 配列に変換（ループ内の高速アクセス用）
+        close_arr    = df["Close"].to_numpy(dtype=float)
+        high_arr     = df["High"].to_numpy(dtype=float)
+        low_arr      = df["Low"].to_numpy(dtype=float)
+        vol_arr      = df["Volume"].to_numpy(dtype=float)
+        donchian_arr = donchian_s.to_numpy(dtype=float)
+        avg_vol_arr  = avg_vol_s.to_numpy(dtype=float)
+        ema_fast_arr = ema_fast_s.to_numpy(dtype=float)
+        ema_slow_arr = ema_slow_s.to_numpy(dtype=float)
+        ma25_arr     = ma25_s.to_numpy(dtype=float)
+        ma75_arr     = ma75_s.to_numpy(dtype=float)
+        dates        = df.index
+        n            = len(df)
+
+        trades:     list[dict] = []
+        in_trade    = False
+        entry_i     = -1
+        last_exit_i = -1   # 前回決済日（5日ルックバック重複防止）
+        entry_price = 0.0
+
+        # ループ開始: donchian / EMA のデータが十分に揃う最初の日
+        start_i = max(donchian_days + LOOKBACK, ema_slow + 5)
+
+        for i in range(start_i, n):
+
+            # ──────────────────────────────────────────────────────────────
+            # ① ポジション保有中: EMAクロスによる決済判定
+            # ──────────────────────────────────────────────────────────────
+            if in_trade:
+                ef = ema_fast_arr[i]
+                es = ema_slow_arr[i]
+
+                exited     = False
+                exit_price = 0.0
+                reason     = ""
+
+                # EMA(fast) < EMA(slow) → デッドクロス: 当日終値で決済
+                if not np.isnan(ef) and not np.isnan(es) and ef < es:
+                    exit_price = close_arr[i]
+                    reason     = "ema_cross"
+                    exited     = True
+                # データ最終日に保有中 → 終値で決済
+                elif i == n - 1:
+                    exit_price = close_arr[i]
+                    reason     = "end_of_data"
+                    exited     = True
+
+                if exited:
+                    holding_days = i - entry_i
+                    ret          = (exit_price - entry_price) / entry_price * 100
+                    # 最後に追加したトレード record を完成させる
+                    trades[-1].update({
+                        "exit_date":    str(dates[i].date()),
+                        "exit_price":   round(float(exit_price), 4),
+                        "return(%)":    round(ret, 2),
+                        "holding_days": holding_days,
+                        "exit_reason":  reason,
+                    })
+                    last_exit_i = i
+                    in_trade    = False
+
+            # ──────────────────────────────────────────────────────────────
+            # ② ノーポジション: エントリーシグナル検索
+            # ──────────────────────────────────────────────────────────────
+            else:
+                # 過去 LOOKBACK 日（前回決済日より後）でブレイクアウトを検索
+                breakout_found = False
+                breakout_lag   = 0   # 0 = 当日, 1 = 1日前, …
+
+                for lag in range(LOOKBACK):
+                    j = i - lag
+                    # 前回決済日以前のシグナルは再利用しない
+                    if j <= last_exit_i or j < start_i:
+                        break
+                    dc = donchian_arr[j]
+                    if np.isnan(dc):
+                        continue
+                    if close_arr[j] > dc:
+                        breakout_found = True
+                        breakout_lag   = lag
+                        break
+
+                if not breakout_found:
+                    continue
+
+                # エントリー時点の EMA が有効か確認
+                if np.isnan(ema_fast_arr[i]) or np.isnan(ema_slow_arr[i]):
+                    continue
+
+                # ── エントリー（当日終値） ────────────────────────────────
+                in_trade    = True
+                entry_i     = i
+                entry_price = float(close_arr[i])
+
+                # ── エントリー時点のスコア構成要素 ───────────────────────
+                avg_v   = avg_vol_arr[i]
+                vol_r   = float(vol_arr[i]) / avg_v if avg_v > 0 and not np.isnan(avg_v) else 0.0
+
+                ma25_v  = ma25_arr[i]
+                ma75_v  = ma75_arr[i]
+                trend_s = (
+                    (ma25_v - ma75_v) / ma75_v * 100
+                    if ma75_v > 0 and not np.isnan(ma75_v) else 0.0
+                )
+
+                # ブレイク強度（ブレイク発生日の数値を使用）
+                j_bp  = i - breakout_lag
+                dc_bp = donchian_arr[j_bp]
+                bp    = (close_arr[j_bp] - dc_bp) / dc_bp * 100 if dc_bp > 0 else 0.0
+
+                # ATR比率の近似（スコア用: High-Low / 終値）
+                atr_r = (float(high_arr[i]) - float(low_arr[i])) / entry_price if entry_price > 0 else 0.0
+
+                # 10日レンジ圧縮
+                if i >= 11:
+                    hi10      = float(np.nanmax(high_arr[max(0, i - 11): i - 1]))
+                    lo10      = float(np.nanmin(low_arr[max(0, i - 11): i - 1]))
+                    range_pct = (hi10 - lo10) / entry_price * 100 if entry_price > 0 else 999.0
+                else:
+                    range_pct = 999.0
+                compression = 100.0 / max(range_pct, 0.5)
+
+                trades.append({
+                    "ティッカー":   ticker,
+                    "entry_date":   str(dates[i].date()),
+                    "entry_price":  round(entry_price, 4),
+                    "exit_date":    None,    # 決済後に更新
+                    "exit_price":   None,
+                    "return(%)":    None,
+                    "holding_days": None,
+                    "exit_reason":  None,
+                    # スコア構成要素（後で正規化）
+                    "_bp":   bp,
+                    "_vr":   vol_r,
+                    "_ts":   trend_s,
+                    "_ar":   atr_r,
+                    "_comp": compression,
+                })
+
+        return trades, None
+
+    except Exception as e:
+        return [], str(e)
+
+
+# ===========================================================================
+# バックテスト: スコア正規化 & DataFrame 整形
+# ===========================================================================
+
+def normalize_bt_scores(trades: list[dict]) -> pd.DataFrame:
+    """
+    全トレードのスコア構成要素を MinMax 正規化（0〜100）し、
+    総合スコアを付与した DataFrame を返す。
+    未決済のトレード（exit_date が None）は除外する。
+    """
+    if not trades:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(trades)
+
+    # 未決済トレードを除外
+    df = df[df["return(%)"].notna()].copy()
+    if df.empty:
+        return df
+
+    # ── MinMax 正規化 ────────────────────────────────────────────────────
+    score_cols  = ["_bp", "_vr", "_ts", "_ar", "_comp"]
+    norm_series = []
+    for col in score_cols:
+        if col not in df.columns:
+            continue
+        mn, mx = df[col].min(), df[col].max()
+        if mx > mn:
+            normed = (df[col] - mn) / (mx - mn) * 100
+        else:
+            normed = pd.Series([50.0] * len(df), index=df.index)
+        norm_series.append(normed)
+
+    df["スコア"] = (
+        pd.concat(norm_series, axis=1).mean(axis=1).round(1)
+        if norm_series else 0.0
+    )
+
+    # 内部用列を削除
+    df = df.drop(columns=[c for c in df.columns if c.startswith("_")])
+
+    # 表示列の順序を整える
+    col_order = [
+        "ティッカー", "entry_date", "exit_date",
+        "entry_price", "exit_price", "return(%)",
+        "holding_days", "exit_reason", "スコア",
+    ]
+    df = df[[c for c in col_order if c in df.columns]]
+
+    return df.reset_index(drop=True)
+
+
+# ===========================================================================
+# 戦略比較: スコア計算ロジック
+# ===========================================================================
+
+def calc_raw_score(row: dict, strategy: str) -> float:
+    """
+    トレード record の生スコア構成要素から、戦略固有のスコア（生値）を返す。
+    全て「高いほど強いシグナル」を意味する値に統一してある。
+
+    構成要素（backtest_ticker で計算済み）:
+        _bp   : ドンチャン突破強度 (%)         ← 大きいほど強い上抜け
+        _vr   : 出来高倍率（平均比）            ← 大きいほど出来高急増
+        _ts   : トレンド強度 (25MA-75MA)/75MA  ← 正値が上昇トレンド
+        _ar   : ATR/終値比率                   ← 大きいほど高ボラ
+        _comp : レンジ圧縮 = 100/range_pct    ← 大きいほど直前が横ばい
+    """
+    bp   = float(row.get("_bp",   0.0) or 0.0)
+    vr   = float(row.get("_vr",   0.0) or 0.0)
+    ts   = float(row.get("_ts",   0.0) or 0.0)
+    ar   = float(row.get("_ar",   0.0) or 0.0)
+    comp = float(row.get("_comp", 0.0) or 0.0)
+
+    if strategy == "momentum":
+        # ブレイク強度(60%) + 出来高急増(40%)
+        return bp * 0.6 + vr * 0.4
+
+    elif strategy == "squeeze":
+        # レンジ圧縮のみ（価格がエネルギー蓄積してからブレイクした銘柄を優先）
+        return comp
+
+    elif strategy == "volatility":
+        # ATR比率（ボラティリティが高い銘柄を優先: 値幅が取れる）
+        return ar * 100.0
+
+    elif strategy == "trend":
+        # トレンド強度（上昇トレンドの強い銘柄のみ: 負は 0 に丸める）
+        return max(ts, 0.0)
+
+    elif strategy == "event":
+        # 全構成要素の均等加重複合スコア
+        return (bp + vr + max(ts, 0.0) + ar * 100.0 + comp) / 5.0
+
+    return 0.0
+
+
+def _minmax_norm(series: pd.Series) -> pd.Series:
+    """MinMax 正規化 (0〜100)。全値同一の場合は 50 を返す"""
+    mn, mx = series.min(), series.max()
+    if mx > mn:
+        return (series - mn) / (mx - mn) * 100.0
+    return pd.Series([50.0] * len(series), index=series.index)
+
+
+# ===========================================================================
+# 戦略比較: メイン集計
+# ===========================================================================
+
+def compare_strategies(
+    raw_trades:    list[dict],
+    selected:      list[str],
+    top_pct:       float,   # 上位 X% のみ対象 (100 = フィルターなし)
+    min_vol_ratio: float,   # 最低出来高倍率 (0 = フィルターなし)
+    min_price:     float,   # 最低価格 (0 = フィルターなし)
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    """
+    各戦略のスコアでフィルタリングしてパフォーマンス指標を比較する。
+
+    Returns:
+        summary_df   : 戦略比較テーブル
+        strat_trades : {strategy_key: filtered_trades_df}  可視化用
+    """
+    if not raw_trades:
+        return pd.DataFrame(), {}
+
+    # 基底 DataFrame（決済済みトレードのみ）
+    base = pd.DataFrame(raw_trades)
+    base = base[base["return(%)"].notna()].copy()
+    if base.empty:
+        return pd.DataFrame(), {}
+
+    # ── 共通フィルター（価格・出来高） ───────────────────────────────────
+    if min_price > 0 and "entry_price" in base.columns:
+        base = base[pd.to_numeric(base["entry_price"], errors="coerce") >= min_price]
+    if min_vol_ratio > 0 and "_vr" in base.columns:
+        base = base[pd.to_numeric(base["_vr"], errors="coerce") >= min_vol_ratio]
+    if base.empty:
+        return pd.DataFrame(), {}
+
+    summary_rows: list[dict]               = []
+    strat_trades: dict[str, pd.DataFrame]  = {}
+
+    for strat in selected:
+        df = base.copy()
+
+        # ── 戦略スコアを計算 ────────────────────────────────────────────
+        df["_raw_score"] = df.apply(lambda r: calc_raw_score(r.to_dict(), strat), axis=1)
+
+        # ── スコア上位○%フィルター ──────────────────────────────────────
+        if top_pct < 100.0 and len(df) > 1:
+            threshold = df["_raw_score"].quantile(1.0 - top_pct / 100.0)
+            df = df[df["_raw_score"] >= threshold].copy()
+
+        if df.empty:
+            continue
+
+        # ── 正規化スコア (0〜100) ────────────────────────────────────────
+        df["スコア"] = _minmax_norm(df["_raw_score"]).round(1)
+
+        # ── パフォーマンス指標 ───────────────────────────────────────────
+        rets = df["return(%)"].astype(float)
+        n    = len(rets)
+
+        total_ret  = float(rets.sum())
+        avg_ret    = float(rets.mean())
+        win_rate   = float((rets > 0).sum() / n * 100)
+
+        # 最大ドローダウン: 累積リターン曲線のピーク比下落
+        cum      = (1 + rets / 100).cumprod()
+        roll_max = cum.cummax()
+        max_dd   = float(((cum - roll_max) / roll_max * 100).min())
+
+        # シャープレシオ: 平均リターン / 標準偏差（簡易版）
+        std    = float(rets.std())
+        sharpe = float(avg_ret / std) if std > 0 else 0.0
+
+        # スコアとリターンの相関係数
+        sc_df = df[["スコア", "return(%)"]].dropna()
+        if len(sc_df) >= 3:
+            corr = float(sc_df["スコア"].corr(sc_df["return(%)"]))
+        else:
+            corr = float("nan")
+
+        summary_rows.append({
+            "戦略":            STRATEGIES.get(strat, strat),
+            "トレード数":      n,
+            "総リターン(%)":   round(total_ret, 2),
+            "平均リターン(%)": round(avg_ret, 2),
+            "勝率(%)":         round(win_rate, 1),
+            "最大DD(%)":       round(max_dd, 2),
+            "シャープ比":      round(sharpe, 3),
+            "スコア相関":      round(corr, 3) if not np.isnan(corr) else None,
+        })
+
+        # 可視化用: エントリー日順にソート
+        if "entry_date" in df.columns:
+            df = df.sort_values("entry_date").reset_index(drop=True)
+        strat_trades[strat] = df
+
+    summary_df = pd.DataFrame(summary_rows) if summary_rows else pd.DataFrame()
+    return summary_df, strat_trades
+
+
+# ===========================================================================
+# 戦略比較: UI 描画
+# ===========================================================================
+
+def render_strategy_comparison(raw_trades: list[dict]) -> None:
+    """戦略比較セクション全体を描画する"""
+    if not raw_trades:
+        st.info("バックテストを実行すると戦略比較が利用できます。")
+        return
+
+    st.divider()
+    st.markdown("## ⚔️ 複数スコア戦略の比較")
+    st.caption(
+        "同じバックテストデータに対してスコア計算ロジックを切り替え、"
+        "各戦略の優劣（総リターン・勝率・ドローダウン・シャープ比・スコア相関）を比較します。"
+    )
+
+    # ── 設定パネル ────────────────────────────────────────────────────────
+    with st.expander("🎛️ 比較設定", expanded=True):
+        sel_col, _ = st.columns([0.65, 0.35])
+        with sel_col:
+            selected = st.multiselect(
+                "比較する戦略を選択",
+                options=list(STRATEGIES.keys()),
+                default=list(STRATEGIES.keys()),
+                format_func=lambda k: STRATEGIES[k],
+                key="strat_compare_select",
+            )
+        fa, fb, fc = st.columns(3)
+        with fa:
+            top_pct = st.slider(
+                "📊 スコア上位 ○% のみ対象",
+                min_value=10, max_value=100, value=100, step=10,
+                help="100% = フィルターなし。50% = スコア上位50%のトレードのみ集計",
+                key="strat_top_pct",
+            )
+        with fb:
+            min_vol_ratio = st.number_input(
+                "🔥 最低出来高倍率",
+                min_value=0.0, max_value=10.0, value=0.0, step=0.5, format="%.1f",
+                help="ブレイク日の出来高 ÷ N日平均の下限。0 = フィルターなし",
+                key="strat_min_vol",
+            )
+        with fc:
+            min_price = st.number_input(
+                "💴 最低価格",
+                min_value=0.0, value=0.0, step=100.0, format="%.0f",
+                help="エントリー価格の下限（円 or USD）。0 = フィルターなし",
+                key="strat_min_price",
+            )
+
+    if not selected:
+        st.info("比較する戦略を1つ以上選択してください。")
+        return
+
+    if not st.button("⚔️ 戦略比較を実行", type="primary", key="strat_run_btn"):
+        return
+
+    with st.spinner("各戦略のパフォーマンスを集計中..."):
+        summary_df, strat_trades = compare_strategies(
+            raw_trades    = raw_trades,
+            selected      = selected,
+            top_pct       = float(top_pct),
+            min_vol_ratio = float(min_vol_ratio),
+            min_price     = float(min_price),
+        )
+
+    if summary_df.empty:
+        st.warning("条件を満たすトレードがありませんでした。フィルター設定を緩めてください。")
+        return
+
+    # ── ① 戦略比較テーブル ──────────────────────────────────────────────
+    st.markdown("### 📋 戦略比較テーブル")
+
+    def _cc(val):
+        try:
+            v = float(val)
+            return "color: #4caf50; font-weight:bold" if v > 0 else "color: #f44336; font-weight:bold"
+        except Exception:
+            return ""
+
+    pos_cols = [c for c in ["総リターン(%)", "平均リターン(%)"] if c in summary_df.columns]
+    fmt_cmp  = {k: v for k, v in {
+        "総リターン(%)":   "{:+.2f}%",
+        "平均リターン(%)": "{:+.2f}%",
+        "勝率(%)":         "{:.1f}%",
+        "最大DD(%)":       "{:+.2f}%",
+        "シャープ比":      "{:.3f}",
+        "スコア相関":      "{:.3f}",
+    }.items() if k in summary_df.columns}
+
+    styled_cmp = summary_df.style.format(fmt_cmp)
+    if pos_cols:
+        styled_cmp = styled_cmp.map(_cc, subset=pos_cols)
+    st.dataframe(styled_cmp, use_container_width=True, hide_index=True)
+
+    # ── ② 累積リターン曲線（戦略別）─────────────────────────────────────
+    st.markdown("### 📈 累積リターン曲線（戦略別）")
+    try:
+        fig, ax = plt.subplots(figsize=(10, 4))
+        for strat_key, df_s in strat_trades.items():
+            if df_s.empty or "return(%)" not in df_s.columns:
+                continue
+            rets = df_s["return(%)"].astype(float).values
+            cum  = np.cumsum(rets)   # 単純累積（視認性重視）
+            ax.plot(range(len(cum)), cum,
+                    label=STRATEGIES.get(strat_key, strat_key), linewidth=1.8)
+        ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax.set_xlabel("トレード番号（エントリー日順）", fontsize=10)
+        ax.set_ylabel("累積リターン (%)", fontsize=10)
+        ax.set_title("戦略別 累積リターン曲線", fontsize=12)
+        ax.legend(fontsize=9, loc="upper left")
+        fig.tight_layout()
+        st.pyplot(fig)
+        plt.close(fig)
+    except Exception as e:
+        st.warning(f"累積リターングラフの描画中にエラー: {e}")
+
+    # ── ③ スコア vs リターン 散布図（戦略別サブプロット）──────────────
+    st.markdown("### 🔍 スコア vs リターン 散布図（戦略別）")
+    n_s = len(strat_trades)
+    if n_s == 0:
+        return
+    try:
+        cols_n = min(n_s, 3)
+        rows_n = math.ceil(n_s / cols_n)
+        fig2, axes = plt.subplots(rows_n, cols_n,
+                                  figsize=(6 * cols_n, 4 * rows_n),
+                                  squeeze=False)
+        for idx, (strat_key, df_s) in enumerate(strat_trades.items()):
+            ri, ci = divmod(idx, cols_n)
+            ax_s   = axes[ri][ci]
+            sc_df  = df_s[["スコア", "return(%)"]].dropna()
+            if sc_df.empty:
+                ax_s.set_visible(False)
+                continue
+            ax_s.scatter(sc_df["スコア"], sc_df["return(%)"],
+                         alpha=0.5, edgecolors="none", s=30)
+            ax_s.axhline(0, color="gray", linewidth=0.7, linestyle="--")
+            if len(sc_df) >= 2:
+                z  = np.polyfit(sc_df["スコア"], sc_df["return(%)"], 1)
+                xs = np.linspace(sc_df["スコア"].min(), sc_df["スコア"].max(), 100)
+                ax_s.plot(xs, np.poly1d(z)(xs), linewidth=1.5)
+            corr_v = sc_df["スコア"].corr(sc_df["return(%)"])
+            ax_s.set_title(
+                f"{STRATEGIES.get(strat_key, strat_key)}\n(r = {corr_v:+.3f})",
+                fontsize=9)
+            ax_s.set_xlabel("スコア", fontsize=8)
+            ax_s.set_ylabel("リターン (%)", fontsize=8)
+        # 余ったサブプロットを非表示
+        for idx in range(n_s, rows_n * cols_n):
+            ri, ci = divmod(idx, cols_n)
+            axes[ri][ci].set_visible(False)
+        fig2.tight_layout()
+        st.pyplot(fig2)
+        plt.close(fig2)
+    except Exception as e:
+        st.warning(f"散布図の描画中にエラー: {e}")
+
+    # ── ④ スコア別リターン分析（戦略別タブ表示）─────────────────────────
+    st.markdown("### 🏆 スコア別リターン分析（戦略別）")
+    st.caption(
+        "各戦略のスコアを5分位に分けて、スコア帯ごとの平均リターン・勝率・最大/最小を集計します。"
+        "「高スコア帯ほどリターンが良い」戦略が有効です。"
+    )
+
+    def _build_score_band_table(df_s: pd.DataFrame) -> pd.DataFrame | None:
+        """戦略 DataFrame からスコア5分位テーブルを作成して返す。失敗時は None"""
+        sc = df_s[["スコア", "return(%)"]].dropna()
+        if len(sc) < 5:
+            return None
+        try:
+            sc = sc.copy()
+            sc["スコア帯"] = pd.qcut(
+                sc["スコア"], q=5,
+                labels=["最低(0-20)", "低(20-40)", "中(40-60)", "高(60-80)", "最高(80-100)"],
+                duplicates="drop",
+            )
+            tbl = (
+                sc.groupby("スコア帯", observed=True)["return(%)"]
+                .agg(
+                    トレード数   = "count",
+                    平均リターン = "mean",
+                    勝率         = lambda x: (x > 0).sum() / len(x) * 100,
+                    最大         = "max",
+                    最小         = "min",
+                )
+                .round(2)
+                .reset_index()
+            )
+            tbl.columns = ["スコア帯", "トレード数", "平均リターン(%)", "勝率(%)", "最大(%)", "最小(%)"]
+            return tbl
+        except Exception:
+            return None
+
+    def _style_score_band(tbl: pd.DataFrame) -> pd.Styler:
+        def _ca(val):
+            try:
+                v = float(val)
+                return "color: #4caf50; font-weight:bold" if v > 0 else "color: #f44336; font-weight:bold"
+            except Exception:
+                return ""
+        return (
+            tbl.style
+            .format({
+                "平均リターン(%)": "{:+.2f}%",
+                "勝率(%)":        "{:.1f}%",
+                "最大(%)":        "{:+.2f}%",
+                "最小(%)":        "{:+.2f}%",
+            })
+            .map(_ca, subset=["平均リターン(%)"])
+        )
+
+    # 各戦略を st.expander で折りたたみ表示
+    for strat_key, df_s in strat_trades.items():
+        strat_label = STRATEGIES.get(strat_key, strat_key)
+        with st.expander(f"{strat_label}", expanded=False):
+            tbl = _build_score_band_table(df_s)
+            if tbl is None:
+                st.info("スコア分析には5件以上のトレードが必要です。")
+                continue
+
+            st.dataframe(_style_score_band(tbl), use_container_width=True, hide_index=True)
+
+            # スコア帯別 平均リターン バーチャート
+            try:
+                fig3, ax3 = plt.subplots(figsize=(7, 2.8))
+                vals   = tbl["平均リターン(%)"].values
+                labels = tbl["スコア帯"].astype(str).values
+                colors = ["#4caf50" if v >= 0 else "#f44336" for v in vals]
+                ax3.bar(labels, vals, color=colors)
+                ax3.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+                ax3.set_ylabel("平均リターン (%)", fontsize=9)
+                ax3.set_title(f"{strat_label} — スコア帯別 平均リターン", fontsize=10)
+                ax3.tick_params(axis="x", labelsize=8)
+                fig3.tight_layout()
+                st.pyplot(fig3)
+                plt.close(fig3)
+            except Exception as e:
+                st.warning(f"グラフ描画エラー: {e}")
+
+
+# ===========================================================================
+# バックテスト高度分析: 銘柄情報キャッシュ付き取得
+# ===========================================================================
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def _fetch_ticker_info(ticker: str) -> dict:
+    """
+    yfinance から銘柄名とセクターを取得してキャッシュする。
+    API 呼び出し失敗時は空の dict を返す（呼び出し元で "Unknown" を補完）。
+    TTL=3600 秒（1時間）でキャッシュを自動更新。
+    """
+    try:
+        info = yf.Ticker(ticker).info
+        return {
+            "name":   info.get("longName") or info.get("shortName") or ticker,
+            "sector": info.get("sector")   or "Unknown",
+        }
+    except Exception:
+        return {"name": ticker, "sector": "Unknown"}
+
+
+# ===========================================================================
+# バックテスト高度分析: 銘柄別 / 相関 / セクター 集計
+# ===========================================================================
+
+def _render_advanced_analysis(result_df: pd.DataFrame) -> None:
+    """
+    バックテスト結果 DataFrame を受け取り、高度分析を描画する。
+
+    ① 銘柄別パフォーマンス（トップ10 / ワースト10）
+    ② スコアとリターンの相関分析（係数 + 散布図）
+    ③ セクター別パフォーマンス
+    """
+    if result_df.empty or "return(%)" not in result_df.columns:
+        return
+
+    df = result_df[result_df["return(%)"].notna()].copy()
+    if df.empty:
+        return
+
+    st.divider()
+    st.markdown("## 🔬 高度分析")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ① 銘柄別パフォーマンス分析
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.markdown("### 📊 銘柄別パフォーマンス")
+
+    ticker_col = "ティッカー"
+    if ticker_col not in df.columns:
+        st.info("銘柄コード列が見つかりません。")
+    else:
+        # 銘柄ごとに平均リターンとトレード数を集計
+        ticker_agg = (
+            df.groupby(ticker_col)["return(%)"]
+            .agg(平均リターン="mean", トレード数="count")
+            .round(2)
+            .reset_index()
+        )
+
+        # 銘柄名を付与（キャッシュ経由）
+        with st.spinner("銘柄情報を取得中..."):
+            ticker_agg["銘柄名"] = ticker_agg[ticker_col].apply(
+                lambda t: _fetch_ticker_info(t).get("name", t)
+            )
+
+        # 表示列を整理
+        ticker_agg = ticker_agg[[ticker_col, "銘柄名", "平均リターン", "トレード数"]]
+        ticker_agg_sorted = ticker_agg.sort_values("平均リターン", ascending=False)
+
+        def _style_ticker_table(tbl: pd.DataFrame) -> pd.Styler:
+            def _cr(val):
+                try:
+                    v = float(val)
+                    return "color: #4caf50; font-weight:bold" if v > 0 else "color: #f44336; font-weight:bold"
+                except Exception:
+                    return ""
+            return (
+                tbl.style
+                .format({"平均リターン": "{:+.2f}%"})
+                .map(_cr, subset=["平均リターン"])
+            )
+
+        top_col, bot_col = st.columns(2)
+        with top_col:
+            st.markdown("#### 🏆 トップ10銘柄（平均リターン高い順）")
+            top10 = ticker_agg_sorted.head(10).reset_index(drop=True)
+            st.dataframe(_style_ticker_table(top10), use_container_width=True, hide_index=True)
+
+        with bot_col:
+            st.markdown("#### 💔 ワースト10銘柄（平均リターン低い順）")
+            bot10 = ticker_agg_sorted.tail(10).sort_values("平均リターン").reset_index(drop=True)
+            st.dataframe(_style_ticker_table(bot10), use_container_width=True, hide_index=True)
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ② スコアとリターンの相関分析
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.divider()
+    st.markdown("### 📈 スコアとリターンの相関分析")
+
+    if "スコア" not in df.columns:
+        st.info("スコア列が見つかりません。バックテストを再実行してください。")
+    else:
+        corr_df = df[["スコア", "return(%)"]].dropna()
+
+        if len(corr_df) < 3:
+            st.info("相関分析には3件以上のトレードが必要です。")
+        else:
+            corr = corr_df["スコア"].corr(corr_df["return(%)"])
+
+            # 相関係数の強度を日本語で表現
+            abs_c = abs(corr)
+            if abs_c >= 0.7:
+                strength = "強い相関"
+            elif abs_c >= 0.4:
+                strength = "中程度の相関"
+            elif abs_c >= 0.2:
+                strength = "弱い相関"
+            else:
+                strength = "ほぼ無相関"
+            direction = "正" if corr > 0 else "負"
+
+            c_metric, c_desc = st.columns([0.3, 0.7])
+            with c_metric:
+                st.metric(
+                    label="スコア × リターン 相関係数",
+                    value=f"{corr:+.4f}",
+                    help="1.0 に近いほど「高スコア = 高リターン」の傾向が強い",
+                )
+            with c_desc:
+                st.markdown(
+                    f"**判定**: {direction}の{strength}（|r| = {abs_c:.3f}）\n\n"
+                    f"スコアが高いエントリーほどリターンが{'良い' if corr > 0 else '悪い'}傾向が"
+                    f"{'あります ✅' if abs_c >= 0.2 else 'ほぼ見られません ⚠️'}"
+                )
+
+            # 散布図（matplotlib）
+            try:
+                fig, ax = plt.subplots(figsize=(7, 4))
+                ax.scatter(
+                    corr_df["スコア"], corr_df["return(%)"],
+                    alpha=0.55, edgecolors="none", s=40,
+                )
+                ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+                ax.set_xlabel("スコア（エントリー時）", fontsize=11)
+                ax.set_ylabel("リターン (%)", fontsize=11)
+                ax.set_title(f"スコア vs リターン  (r = {corr:+.4f})", fontsize=12)
+
+                # 近似直線
+                if len(corr_df) >= 2:
+                    z = np.polyfit(corr_df["スコア"], corr_df["return(%)"], 1)
+                    p = np.poly1d(z)
+                    xs = np.linspace(corr_df["スコア"].min(), corr_df["スコア"].max(), 100)
+                    ax.plot(xs, p(xs), linewidth=1.5, linestyle="-")
+
+                fig.tight_layout()
+                st.pyplot(fig)
+                plt.close(fig)
+            except Exception as e:
+                st.warning(f"散布図の描画中にエラー: {e}")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ③ セクター別パフォーマンス分析
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.divider()
+    st.markdown("### 🏭 セクター別パフォーマンス")
+
+    if ticker_col not in df.columns:
+        st.info("銘柄コード列が見つかりません。")
+        return
+
+    with st.spinner("セクター情報を取得中（初回のみ時間がかかります）..."):
+        unique_tickers = df[ticker_col].dropna().unique().tolist()
+        sector_map: dict[str, str] = {
+            t: _fetch_ticker_info(t).get("sector", "Unknown")
+            for t in unique_tickers
+        }
+
+    # セクター列を付与してから集計
+    df_sec = df.copy()
+    df_sec["セクター"] = df_sec[ticker_col].map(sector_map).fillna("Unknown")
+
+    sector_agg = (
+        df_sec.groupby("セクター")["return(%)"]
+        .agg(
+            トレード数   = "count",
+            平均リターン  = "mean",
+            勝率         = lambda x: (x > 0).sum() / len(x) * 100,
+            最大リターン  = "max",
+            最小リターン  = "min",
+        )
+        .round(2)
+        .sort_values("平均リターン", ascending=False)
+        .reset_index()
+    )
+    sector_agg.columns = [
+        "セクター", "トレード数", "平均リターン(%)", "勝率(%)", "最大(%)", "最小(%)"
+    ]
+
+    def _color_sec_avg(val):
+        try:
+            v = float(val)
+            return "color: #4caf50; font-weight:bold" if v > 0 else "color: #f44336; font-weight:bold"
+        except Exception:
+            return ""
+
+    styled_sec = (
+        sector_agg.style
+        .format({
+            "平均リターン(%)": "{:+.2f}%",
+            "勝率(%)":        "{:.1f}%",
+            "最大(%)":        "{:+.2f}%",
+            "最小(%)":        "{:+.2f}%",
+        })
+        .map(_color_sec_avg, subset=["平均リターン(%)"])
+    )
+    st.dataframe(styled_sec, use_container_width=True, hide_index=True)
+
+    # セクター別平均リターン バーチャート
+    try:
+        fig2, ax2 = plt.subplots(figsize=(8, max(3, len(sector_agg) * 0.45)))
+        values    = sector_agg["平均リターン(%)"].values
+        labels    = sector_agg["セクター"].values
+        colors    = ["#4caf50" if v >= 0 else "#f44336" for v in values]
+        ax2.barh(labels[::-1], values[::-1], color=colors[::-1])
+        ax2.axvline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax2.set_xlabel("平均リターン (%)", fontsize=11)
+        ax2.set_title("セクター別 平均リターン", fontsize=12)
+        fig2.tight_layout()
+        st.pyplot(fig2)
+        plt.close(fig2)
+    except Exception as e:
+        st.warning(f"セクターグラフの描画中にエラー: {e}")
+
+
+# ===========================================================================
+# バックテスト: CSV アップロードパーサー
+# ===========================================================================
+
+def _parse_csv_tickers(uploaded_file) -> tuple[list[str], str | None]:
+    """
+    アップロードされた CSV から銘柄コードのリストを抽出して返す。
+
+    対応フォーマット:
+        パターン①: カラム名 "ticker"  例: 7203.T
+        パターン②: カラム名 "code"    例: 7203  → 自動で .T を付与
+
+    Returns:
+        (tickers_list, error_message)
+        成功時は error_message=None、失敗時は tickers_list=[]
+    """
+    try:
+        df = pd.read_csv(uploaded_file, dtype=str)
+
+        # ── カラム名を小文字に正規化して判定 ────────────────────────────
+        df.columns = df.columns.str.strip().str.lower()
+
+        if "ticker" in df.columns:
+            raw = df["ticker"].dropna().astype(str).str.strip()
+        elif "code" in df.columns:
+            raw = df["code"].dropna().astype(str).str.strip()
+        else:
+            # どちらのカラム名も見つからない場合: 最初の列を使用
+            raw = df.iloc[:, 0].dropna().astype(str).str.strip()
+
+        tickers: list[str] = []
+        for val in raw:
+            val = val.strip()
+            if not val:
+                continue
+
+            # ── ドット前の「基本コード」を取り出す ──────────────────────
+            # 例: "7203"    → base="7203"
+            #     "7203.T"  → base="7203"
+            #     "7203.JP" → base="7203"  ← .JP などの誤サフィックスを除去
+            #     "7203.0"  → base="7203"  ← pandas の float 変換対策
+            #     "AAPL"    → base="AAPL"
+            base = val.split(".")[0].strip()
+
+            if base.isdigit():
+                # 数字コード → 日本株として .T を付与（既存サフィックスは上書き）
+                val = base + ".T"
+            # 英字ティッカー（米国株など）はそのまま保持
+
+            tickers.append(val.upper())
+
+        # 重複削除（順序を保持）
+        tickers = list(dict.fromkeys(tickers))
+
+        if not tickers:
+            return [], "CSVに有効な銘柄コードが見つかりませんでした。"
+
+        return tickers, None
+
+    except Exception as e:
+        return [], f"CSV 読み込みエラー: {e}"
+
+
+# ===========================================================================
+# 画面描画: バックテストタブ
+# ===========================================================================
+
+def render_backtest_tab() -> None:
+    st.title("📈 バックテスト（ドンチャン + EMAクロス）")
+    st.markdown("""
+    ドンチャンブレイクアウト＋EMAクロス決済戦略の過去パフォーマンスを検証します。
+    - 📌 エントリー: ドンチャン上抜け **shift(1)** → 当日終値でエントリー
+    - 🔴 決済: **EMA(fast) < EMA(slow)** のデッドクロス → 当日終値で決済
+    - 📊 エントリー時スコアと実際のリターンの相関を分析
+    """)
+    st.divider()
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ① バックテスト設定
+    # ────────────────────────────────────────────────────────────────────────
+    st.markdown("### ⚙️ バックテスト設定")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    with c1:
+        period_years = st.selectbox(
+            "📅 検証期間",
+            options=[1, 3, 5],
+            index=1,
+            format_func=lambda x: f"{x}年",
+            help="yfinance から取得する過去データの期間",
+        )
+    with c2:
+        donchian_days = st.number_input(
+            "📐 ドンチャン期間（日）",
+            min_value=5, max_value=60, value=20, step=1,
+            help="N日高値上抜けをエントリー条件とする日数",
+        )
+    with c3:
+        ema_fast = st.number_input(
+            "📉 EMA 短期（期間）",
+            min_value=2, max_value=50, value=5, step=1,
+            help="デッドクロス判定の短期EMA期間（デフォルト: 5）",
+        )
+    with c4:
+        ema_slow = st.number_input(
+            "📈 EMA 長期（期間）",
+            min_value=5, max_value=200, value=20, step=1,
+            help="デッドクロス判定の長期EMA期間（デフォルト: 20）",
+        )
+    with c5:
+        use_5day = st.checkbox(
+            "過去5日以内ブレイクも対象",
+            value=False,
+            help="当日だけでなく、過去5営業日以内のブレイクシグナルでも当日終値でエントリー",
+        )
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ② 銘柄リスト（プリセット / CSV アップロード / 手動入力）
+    # ────────────────────────────────────────────────────────────────────────
+    st.markdown("### 📋 銘柄リスト")
+
+    # ── プリセット選択 ────────────────────────────────────────────────────
+    bt_preset_col, csv_col = st.columns([0.45, 0.55])
+    with bt_preset_col:
+        bt_preset = st.selectbox("入力方法", PRESET_OPTIONS, key="bt_preset_select")
+
+    # プリセット切り替え時のみテキストを上書き
+    # bt_ticker_area（text_area の key）も同時に更新することで表示に即反映される
+    if bt_preset != st.session_state.bt_prev_preset:
+        if bt_preset == PRESET_OPTIONS[1]:
+            preset_str = ", ".join(TOPIX100_TICKERS)
+            st.session_state.bt_ticker_input = preset_str
+            st.session_state.bt_ticker_area  = preset_str
+        elif bt_preset == PRESET_OPTIONS[2]:
+            preset_str = ", ".join(NIKKEI225_TICKERS)
+            st.session_state.bt_ticker_input = preset_str
+            st.session_state.bt_ticker_area  = preset_str
+        st.session_state.bt_prev_preset = bt_preset
+
+    # ── CSV アップロード ──────────────────────────────────────────────────
+    with csv_col:
+        uploaded_csv = st.file_uploader(
+            "📂 銘柄CSVをアップロード",
+            type=["csv"],
+            key="bt_csv_uploader",
+            help=(
+                "ticker 列（例: 7203.T）または code 列（例: 7203）を含む CSV。\n"
+                "アップロードするとテキストエリアの内容を自動置換します。"
+            ),
+        )
+
+    # CSV が新たにアップロードされたとき: 内容をテキストエリアに反映
+    if uploaded_csv is not None:
+        # ファイルが変わったときだけ再パース（file_id で判定）
+        csv_file_id = getattr(uploaded_csv, "file_id", uploaded_csv.name)
+        if st.session_state.get("bt_csv_file_id") != csv_file_id:
+            st.session_state.bt_csv_file_id = csv_file_id
+            parsed, err = _parse_csv_tickers(uploaded_csv)
+            if err:
+                st.error(f"❌ {err}")
+            else:
+                ticker_str = ", ".join(parsed)
+                # bt_ticker_input: プリセット保護などの内部変数を更新
+                st.session_state.bt_ticker_input = ticker_str
+                # bt_ticker_area: st.text_area の key と同名 → ウィジェット表示値を直接更新
+                # （この変数が text_area より先にセットされることで次回描画に反映される）
+                st.session_state.bt_ticker_area  = ticker_str
+                st.success(
+                    f"✅ CSV 読み込み成功 — **{len(parsed)} 銘柄**をテキストエリアに反映しました。"
+                )
+
+    # ── テキストエリア（プリセット / CSV / 手動 で共有） ─────────────────
+    # key="bt_ticker_area" を持つ text_area は st.session_state["bt_ticker_area"] で管理される。
+    # CSV / プリセット 切り替え時は上記で bt_ticker_area を直接更新済みなので
+    # ここでは常に session_state の値をデフォルトとして渡すだけでよい。
+    # （key 指定ウィジェットは value= より session_state[key] を優先するため、
+    #   bt_ticker_area がセット済みの場合は value= は無視される）
+    if "bt_ticker_area" not in st.session_state:
+        st.session_state.bt_ticker_area = st.session_state.bt_ticker_input
+
+    bt_ticker_input = st.text_area(
+        "銘柄コード（カンマ区切り）",
+        height=80,
+        key="bt_ticker_area",
+        label_visibility="collapsed",
+        help="4桁数字も可（7203 → 7203.T に自動変換）。CSVアップロード後は手動編集も可能。",
+    )
+    # 手動入力モード時のみ bt_ticker_input（内部変数）を同期
+    if bt_preset == PRESET_OPTIONS[0] and uploaded_csv is None:
+        st.session_state.bt_ticker_input = bt_ticker_input
+
+    raw_bt = [t.strip() for t in bt_ticker_input.split(",") if t.strip()]
+    st.caption(f"銘柄数: **{len(raw_bt)}** 件")
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ③ 実行 / クリア ボタン
+    # ────────────────────────────────────────────────────────────────────────
+    run_col, clr_col, _ = st.columns([0.22, 0.10, 0.68])
+    with run_col:
+        run_bt = st.button("🚀 バックテスト実行", type="primary", use_container_width=True)
+    with clr_col:
+        if st.button("クリア", key="bt_clear", use_container_width=True):
+            st.session_state.bt_results    = None
+            st.session_state.bt_raw_trades = []
+            st.rerun()
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ④ バックテスト実行処理
+    # ────────────────────────────────────────────────────────────────────────
+    if run_bt:
+        if not raw_bt:
+            st.warning("銘柄コードを入力してください。")
+        else:
+            tickers    = [normalize_ticker(t) for t in raw_bt]
+            all_trades: list[dict] = []
+            errors:     list[str]  = []
+
+            prog = st.progress(0, text=f"バックテスト開始... (0 / {len(tickers)})")
+            stat = st.empty()
+
+            for idx, ticker in enumerate(tickers):
+                prog.progress(
+                    idx / len(tickers),
+                    text=f"処理中... {idx + 1} / {len(tickers)}  |  累計トレード: {len(all_trades)} 件",
+                )
+                stat.caption(f"🔍 {ticker} を検証中")
+
+                trades, err = backtest_ticker(
+                    ticker            = ticker,
+                    period_years      = int(period_years),
+                    donchian_days     = int(donchian_days),
+                    ema_fast          = int(ema_fast),
+                    ema_slow          = int(ema_slow),
+                    use_5day_lookback = use_5day,
+                )
+                all_trades.extend(trades)
+                if err:
+                    errors.append(f"{ticker}: {err}")
+
+            prog.progress(1.0, text=f"✅ 完了  {len(all_trades)} トレードを収集")
+            stat.empty()
+
+            # 生トレードを保存（戦略比較用: _bp/_vr/_ts/_ar/_comp を含む）
+            st.session_state.bt_raw_trades = all_trades
+            # スコア正規化 & DataFrame 整形
+            st.session_state.bt_results = normalize_bt_scores(all_trades)
+
+            if errors:
+                with st.expander(f"⚠️ スキップされた銘柄 ({len(errors)} 件)"):
+                    for e in errors:
+                        st.caption(e)
+
+    # ────────────────────────────────────────────────────────────────────────
+    # ⑤ 結果表示
+    # ────────────────────────────────────────────────────────────────────────
+    if st.session_state.bt_results is None:
+        return
+
+    result_df = st.session_state.bt_results
+    st.divider()
+
+    if result_df.empty:
+        st.info("🔍 有効なトレードが見つかりませんでした。設定を変更して再実行してください。")
+        return
+
+    returns      = result_df["return(%)"].dropna()
+    n_trades     = len(returns)
+    win_rate     = (returns > 0).sum() / n_trades * 100 if n_trades > 0 else 0.0
+    avg_return   = float(returns.mean())
+    cum_return   = float(returns.sum())
+    avg_hold     = float(result_df["holding_days"].dropna().mean())
+
+    # ── サマリーメトリクス ────────────────────────────────────────────────
+    st.markdown("### 📊 バックテスト結果サマリー")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("📈 トレード数",    f"{n_trades} 件")
+    m2.metric("🎯 勝率",          f"{win_rate:.1f}%")
+    m3.metric("📉 平均リターン",  f"{avg_return:+.2f}%")
+    m4.metric("💹 累積リターン",  f"{cum_return:+.1f}%")
+
+    # 詳細統計（折りたたみ）
+    with st.expander("📋 詳細統計"):
+        wins  = returns[returns > 0]
+        loses = returns[returns <= 0]
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("勝ちトレード",  f"{len(wins)} 件")
+        d2.metric("負けトレード",  f"{len(loses)} 件")
+        d3.metric("平均利益",      f"{wins.mean():+.2f}%"  if len(wins)  > 0 else "N/A")
+        d4.metric("平均損失",      f"{loses.mean():+.2f}%" if len(loses) > 0 else "N/A")
+        st.caption(
+            f"平均保有日数: **{avg_hold:.1f}日** ／ "
+            f"最大利益: **{returns.max():+.2f}%** ／ "
+            f"最大損失: **{returns.min():+.2f}%**"
+        )
+
+    st.divider()
+
+    # ── トレード一覧テーブル ──────────────────────────────────────────────
+    st.markdown("### 📋 トレード一覧")
+
+    def _color_return(val):
+        """リターン列の文字色を勝敗で変える"""
+        try:
+            v = float(val)
+            if v > 0:
+                return "color: #4caf50; font-weight: bold"
+            elif v < 0:
+                return "color: #f44336; font-weight: bold"
+        except Exception:
+            pass
+        return ""
+
+    fmt_trades = {k: v for k, v in {
+        "entry_price":  "{:,.4f}",
+        "exit_price":   "{:,.4f}",
+        "return(%)":    "{:+.2f}%",
+        "スコア":       "{:.1f}",
+    }.items() if k in result_df.columns}
+
+    styled_trades = (
+        result_df.style
+        .format(fmt_trades)
+        .map(_color_return, subset=["return(%)"] if "return(%)" in result_df.columns else [])
+    )
+    st.dataframe(styled_trades, use_container_width=True, hide_index=True)
+
+    # ── スコア別リターン分析 ──────────────────────────────────────────────
+    if "スコア" in result_df.columns:
+        st.divider()
+        st.markdown("### 🏆 スコア別リターン分析")
+        st.caption(
+            "エントリー時のスコア（ブレイク強度・出来高・トレンド・ATR比率・レンジ圧縮の複合）"
+            "が高いトレードほど、EMAクロス決済後のリターンが良いかを検証します。"
+        )
+
+        score_df = result_df[["スコア", "return(%)"]].dropna()
+
+        if len(score_df) < 5:
+            st.info("スコア分析には5件以上のトレードが必要です。")
+        else:
+            try:
+                score_df = score_df.copy()
+                # スコアを5分位に分類（重複値があっても drop で対応）
+                score_df["スコア帯"] = pd.qcut(
+                    score_df["スコア"], q=5,
+                    labels=["最低(0-20)", "低(20-40)", "中(40-60)", "高(60-80)", "最高(80-100)"],
+                    duplicates="drop",
+                )
+
+                score_analysis = (
+                    score_df.groupby("スコア帯", observed=True)["return(%)"]
+                    .agg(
+                        トレード数  = "count",
+                        平均リターン = "mean",
+                        勝率        = lambda x: (x > 0).sum() / len(x) * 100,
+                        最大        = "max",
+                        最小        = "min",
+                    )
+                    .round(2)
+                    .reset_index()
+                )
+                score_analysis.columns = [
+                    "スコア帯", "トレード数", "平均リターン(%)", "勝率(%)", "最大(%)", "最小(%)"
+                ]
+
+                def _color_avg(val):
+                    try:
+                        v = float(val)
+                        return (
+                            "color: #4caf50; font-weight: bold" if v > 0
+                            else "color: #f44336; font-weight: bold"
+                        )
+                    except Exception:
+                        return ""
+
+                styled_score = (
+                    score_analysis.style
+                    .format({
+                        "平均リターン(%)": "{:+.2f}%",
+                        "勝率(%)":        "{:.1f}%",
+                        "最大(%)":        "{:+.2f}%",
+                        "最小(%)":        "{:+.2f}%",
+                    })
+                    .map(_color_avg, subset=["平均リターン(%)"])
+                )
+                st.dataframe(styled_score, use_container_width=True, hide_index=True)
+
+                # スコア帯別の平均リターンをバーチャートで可視化
+                chart_data = score_analysis.set_index("スコア帯")["平均リターン(%)"]
+                st.bar_chart(chart_data, use_container_width=True, height=250)
+
+            except Exception as e:
+                st.warning(f"スコア分析中にエラーが発生しました: {e}")
+
+    # ── 高度分析（銘柄別 / 相関 / セクター） ────────────────────────────
+    _render_advanced_analysis(result_df)
+
+    # ── 複数スコア戦略の比較 ─────────────────────────────────────────────
+    render_strategy_comparison(st.session_state.get("bt_raw_trades", []))
+
+    # ── 時間フィルターバックテスト ───────────────────────────────────────
+    render_time_filter_backtest()
+
+    # ── パラメータ最適化モード ───────────────────────────────────────────
+    render_param_optimization()
+
+
+# ===========================================================================
+# 時間フィルターバックテスト: 1銘柄シミュレーション
+# ===========================================================================
+
+DELAY_DAYS_LIST: list[int] = [0, 3, 5, 10, 15, 20, 30]
+
+def delayed_backtest_ticker(
+    ticker:          str,
+    period_years:    int,
+    donchian_days:   int   = 20,
+    ema_fast:        int   = 5,
+    ema_slow:        int   = 20,
+    delay_days_list: list  = DELAY_DAYS_LIST,
+    max_dd_pct:      float = 5.0,   # ブレイク後・エントリー前の最大許容ドローダウン(%)
+) -> tuple[list[dict], str | None]:
+    """
+    ドンチャンブレイクアウト後に delay_days 待機してからエントリーする戦略を検証。
+
+    エントリー条件（delay 日後）:
+        1. close[entry_i] > breakout_price（依然としてブレイク水準を上回っている）
+        2. EMA(fast)[entry_i] > EMA(slow)[entry_i]（上昇トレンド継続）
+        3. ブレイク日からエントリー日の間の最大下落が max_dd_pct% 以内
+
+    決済条件:
+        EMA(fast) < EMA(slow) → 当日終値で決済
+        最終日に保有中 → 終値で決済
+
+    Returns:
+        (trades_list, error_message)
+        各 trade dict に "delay_days" キーを含む。
+    """
+    PERIOD_MAP = {1: "1y", 3: "3y", 5: "5y"}
+    period_str = PERIOD_MAP.get(period_years, "1y")
+
+    try:
+        df = yf.download(ticker, period=period_str, progress=False, auto_adjust=True)
+        if df.empty:
+            return [], "データなし"
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        min_rows = max(donchian_days + max(delay_days_list) + 5, ema_slow + 10)
+        if len(df) < min_rows:
+            return [], f"データ不足（{len(df)}日）"
+
+        # ── テクニカル指標（Series → numpy 配列）────────────────────────
+        donchian_s   = df["High"].rolling(donchian_days).max().shift(1)
+        ema_fast_s   = df["Close"].ewm(span=ema_fast, adjust=False).mean()
+        ema_slow_s   = df["Close"].ewm(span=ema_slow, adjust=False).mean()
+
+        close_arr    = df["Close"].to_numpy(dtype=float)
+        donchian_arr = donchian_s.to_numpy(dtype=float)
+        ema_fast_arr = ema_fast_s.to_numpy(dtype=float)
+        ema_slow_arr = ema_slow_s.to_numpy(dtype=float)
+        dates        = df.index
+        n            = len(df)
+
+        trades: list[dict] = []
+        start_i = max(donchian_days + 2, ema_slow + 5)
+
+        # ── 各 delay でシミュレーションを独立実行 ────────────────────────
+        for delay in delay_days_list:
+            in_trade    = False
+            entry_i     = -1
+            last_exit_i = -1
+            entry_price = 0.0
+            bo_price    = 0.0   # ブレイク時の close（エントリー条件の比較基準）
+
+            for i in range(start_i, n):
+
+                # ① ポジション保有中: EMAクロスで決済
+                if in_trade:
+                    ef = ema_fast_arr[i]
+                    es = ema_slow_arr[i]
+                    exited     = False
+                    exit_price = 0.0
+                    reason     = ""
+
+                    if not np.isnan(ef) and not np.isnan(es) and ef < es:
+                        exit_price = close_arr[i]
+                        reason     = "ema_cross"
+                        exited     = True
+                    elif i == n - 1:
+                        exit_price = close_arr[i]
+                        reason     = "end_of_data"
+                        exited     = True
+
+                    if exited:
+                        ret          = (exit_price - entry_price) / entry_price * 100
+                        holding_days = i - entry_i
+                        trades[-1].update({
+                            "exit_date":    str(dates[i].date()),
+                            "exit_price":   round(float(exit_price), 4),
+                            "return(%)":    round(ret, 2),
+                            "holding_days": holding_days,
+                            "exit_reason":  reason,
+                        })
+                        last_exit_i = i
+                        in_trade    = False
+
+                # ② ノーポジション: ブレイクシグナル検出
+                else:
+                    dc = donchian_arr[i]
+                    if np.isnan(dc):
+                        continue
+                    # ブレイク検出（当日）
+                    if close_arr[i] <= dc or i <= last_exit_i:
+                        continue
+
+                    # ブレイク発生日 = i、遅延エントリー候補日 = i + delay
+                    bo_i      = i
+                    entry_idx = bo_i + delay
+
+                    if entry_idx >= n:
+                        continue   # データ終端を超える場合はスキップ
+
+                    bo_close = float(close_arr[bo_i])   # ブレイク時の終値
+
+                    # ── エントリー条件チェック（delay 日後） ──────────────
+                    c_e   = float(close_arr[entry_idx])
+                    ef_e  = float(ema_fast_arr[entry_idx])
+                    es_e  = float(ema_slow_arr[entry_idx])
+
+                    # 条件①: まだブレイク水準を上回っているか
+                    if c_e <= bo_close:
+                        continue
+
+                    # 条件②: EMA トレンド確認（EMA fast > slow）
+                    if np.isnan(ef_e) or np.isnan(es_e) or ef_e <= es_e:
+                        continue
+
+                    # 条件③: ブレイク後のドローダウンが許容範囲内か
+                    if delay > 0:
+                        window_close = close_arr[bo_i: entry_idx + 1]
+                        peak         = float(np.nanmax(window_close))
+                        trough       = float(np.nanmin(window_close))
+                        dd_pct       = (trough - peak) / peak * 100  # 負値
+                        if abs(dd_pct) > max_dd_pct:
+                            continue   # ドローダウンが大きすぎる
+
+                    # ── エントリー実行 ────────────────────────────────────
+                    in_trade    = True
+                    entry_i     = entry_idx
+                    entry_price = c_e
+
+                    trades.append({
+                        "delay_days":   delay,
+                        "ティッカー":   ticker,
+                        "breakout_date": str(dates[bo_i].date()),
+                        "entry_date":   str(dates[entry_idx].date()),
+                        "entry_price":  round(entry_price, 4),
+                        "exit_date":    None,
+                        "exit_price":   None,
+                        "return(%)":    None,
+                        "holding_days": None,
+                        "exit_reason":  None,
+                    })
+
+                    # 次のブレイク探索は決済後まで待機
+                    # （ループは entry_idx の次から継続するが in_trade=True で保護）
+
+        return trades, None
+
+    except Exception as e:
+        return [], str(e)
+
+
+# ===========================================================================
+# 時間フィルターバックテスト: 集計ヘルパー
+# ===========================================================================
+
+def _summarize_by_delay(trades_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    delay_days ごとにパフォーマンス指標を集計して比較テーブルを返す。
+    """
+    rows = []
+    for delay, grp in trades_df.groupby("delay_days"):
+        rets = grp["return(%)"].dropna().astype(float)
+        n    = len(rets)
+        if n == 0:
+            continue
+
+        total_ret = float(rets.sum())
+        avg_ret   = float(rets.mean())
+        win_rate  = float((rets > 0).sum() / n * 100)
+
+        # 最大ドローダウン（累積リターン曲線ベース）
+        cum      = (1 + rets / 100).cumprod()
+        roll_max = cum.cummax()
+        max_dd   = float(((cum - roll_max) / roll_max * 100).min())
+
+        # シャープレシオ（簡易）
+        std    = float(rets.std())
+        sharpe = round(avg_ret / std, 3) if std > 0 else 0.0
+
+        avg_hold = float(grp["holding_days"].dropna().mean())
+
+        rows.append({
+            "遅延日数":        delay,
+            "トレード数":      n,
+            "総リターン(%)":   round(total_ret, 2),
+            "平均リターン(%)": round(avg_ret, 2),
+            "勝率(%)":         round(win_rate, 1),
+            "最大DD(%)":       round(max_dd, 2),
+            "シャープ比":      sharpe,
+            "平均保有日数":    round(avg_hold, 1),
+        })
+
+    return pd.DataFrame(rows)
+
+
+# ===========================================================================
+# 時間フィルターバックテスト: UI 描画
+# ===========================================================================
+
+def render_time_filter_backtest() -> None:
+    """時間フィルターバックテストのセクション全体を描画する"""
+    st.divider()
+    st.markdown("## ⏱️ 時間フィルターバックテスト")
+    st.markdown("""
+    ブレイク検知後すぐにエントリーせず、**一定期間生き残ったトレンドのみエントリー**する戦略を検証します。
+    - 📌 ブレイク後 N 日待機 → その時点で **依然ブレイク水準以上 + EMA 上昇** ならエントリー
+    - 🛡️ 待機期間中のドローダウンが許容範囲を超えた場合はスキップ
+    - 🔴 決済: EMAクロス（EMA5 < EMA20）または最終日
+    """)
+
+    # ── 設定パネル ────────────────────────────────────────────────────────
+    st.markdown("### ⚙️ 設定")
+    cf1, cf2, cf3, cf4 = st.columns(4)
+    with cf1:
+        tf_period = st.selectbox(
+            "📅 検証期間",
+            options=[1, 3, 5], index=1,
+            format_func=lambda x: f"{x}年",
+            key="tf_period",
+        )
+    with cf2:
+        tf_donchian = st.number_input(
+            "📐 ドンチャン期間",
+            min_value=5, max_value=60, value=20, step=1,
+            key="tf_donchian",
+        )
+    with cf3:
+        tf_max_dd = st.number_input(
+            "🛡️ 最大許容DD(%)",
+            min_value=0.0, max_value=30.0, value=5.0, step=0.5, format="%.1f",
+            help="ブレイク日〜エントリー日の間の最大下落率の上限。超えたらスキップ。",
+            key="tf_max_dd",
+        )
+    with cf4:
+        tf_delays = st.multiselect(
+            "⏳ 検証する遅延日数",
+            options=DELAY_DAYS_LIST,
+            default=DELAY_DAYS_LIST,
+            key="tf_delays",
+            help="複数選択可。0 = 即時エントリー（ベースライン）",
+        )
+
+    # ── 銘柄リスト入力 ────────────────────────────────────────────────────
+    st.markdown("### 📋 銘柄リスト")
+    tf_input = st.text_area(
+        "銘柄コード（カンマ区切り）",
+        value="7203, 9984, 6758, 8306, 9433",
+        height=60,
+        key="tf_ticker_input",
+        label_visibility="collapsed",
+        help="4桁数字も可（7203 → 7203.T に自動変換）",
+    )
+    tf_raw   = [t.strip() for t in tf_input.split(",") if t.strip()]
+    st.caption(f"銘柄数: **{len(tf_raw)}** 件")
+
+    # ── 実行 / クリア ─────────────────────────────────────────────────────
+    rb1, rb2, _ = st.columns([0.25, 0.12, 0.63])
+    with rb1:
+        tf_run = st.button("🚀 時間フィルター実行", type="primary",
+                           use_container_width=True, key="tf_run_btn")
+    with rb2:
+        if st.button("クリア", key="tf_clear_btn", use_container_width=True):
+            st.session_state.tf_results = None
+            st.rerun()
+
+    # ── 実行処理 ──────────────────────────────────────────────────────────
+    if tf_run:
+        if not tf_raw:
+            st.warning("銘柄コードを入力してください。")
+        elif not tf_delays:
+            st.warning("遅延日数を1つ以上選択してください。")
+        else:
+            tickers    = [normalize_ticker(t) for t in tf_raw]
+            all_trades: list[dict] = []
+            errors:     list[str]  = []
+
+            prog = st.progress(0, text=f"時間フィルターバックテスト開始... (0 / {len(tickers)})")
+            stat = st.empty()
+
+            for idx, ticker in enumerate(tickers):
+                prog.progress(
+                    idx / len(tickers),
+                    text=f"処理中... {idx + 1} / {len(tickers)}  |  累計: {len(all_trades)} 件",
+                )
+                stat.caption(f"🔍 {ticker} を検証中")
+
+                trades, err = delayed_backtest_ticker(
+                    ticker          = ticker,
+                    period_years    = int(tf_period),
+                    donchian_days   = int(tf_donchian),
+                    ema_fast        = 5,
+                    ema_slow        = 20,
+                    delay_days_list = [int(d) for d in tf_delays],
+                    max_dd_pct      = float(tf_max_dd),
+                )
+                all_trades.extend(trades)
+                if err:
+                    errors.append(f"{ticker}: {err}")
+
+            prog.progress(1.0, text=f"✅ 完了  {len(all_trades)} トレードを収集")
+            stat.empty()
+
+            completed = [t for t in all_trades if t.get("return(%)") is not None]
+            st.session_state.tf_results = pd.DataFrame(completed) if completed else pd.DataFrame()
+
+            if errors:
+                with st.expander(f"⚠️ スキップされた銘柄 ({len(errors)} 件)"):
+                    for e in errors:
+                        st.caption(e)
+
+    # ── 結果表示 ──────────────────────────────────────────────────────────
+    if "tf_results" not in st.session_state or st.session_state.tf_results is None:
+        return
+
+    tf_df = st.session_state.tf_results
+    st.divider()
+
+    if tf_df.empty:
+        st.info("🔍 有効なトレードが見つかりませんでした。設定を変更して再実行してください。")
+        return
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ① 遅延日数別パフォーマンス比較テーブル
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.markdown("### 📋 時間フィルター分析 — 遅延日数別比較")
+    st.caption(
+        "遅延日数 0 = 即時エントリー（ベースライン）。"
+        "遅延を増やすとトレード数は減るが、より「生き残ったトレンド」に絞り込まれます。"
+    )
+
+    summary = _summarize_by_delay(tf_df)
+
+    def _cc_tf(val):
+        try:
+            v = float(val)
+            return "color: #4caf50; font-weight:bold" if v > 0 else "color: #f44336; font-weight:bold"
+        except Exception:
+            return ""
+
+    fmt_sum = {k: v for k, v in {
+        "総リターン(%)":   "{:+.2f}%",
+        "平均リターン(%)": "{:+.2f}%",
+        "勝率(%)":         "{:.1f}%",
+        "最大DD(%)":       "{:+.2f}%",
+        "シャープ比":      "{:.3f}",
+        "平均保有日数":    "{:.1f}日",
+    }.items() if k in summary.columns}
+
+    pos_c = [c for c in ["総リターン(%)", "平均リターン(%)"] if c in summary.columns]
+    styled_sum = summary.style.format(fmt_sum)
+    if pos_c:
+        styled_sum = styled_sum.map(_cc_tf, subset=pos_c)
+    st.dataframe(styled_sum, use_container_width=True, hide_index=True)
+
+    # 遅延日数別 平均リターン バーチャート
+    try:
+        fig_d, ax_d = plt.subplots(figsize=(8, 3))
+        vals_d   = summary["平均リターン(%)"].values
+        labels_d = [f"{int(d)}日" for d in summary["遅延日数"].values]
+        colors_d = ["#4caf50" if v >= 0 else "#f44336" for v in vals_d]
+        ax_d.bar(labels_d, vals_d, color=colors_d)
+        ax_d.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax_d.set_xlabel("遅延日数", fontsize=10)
+        ax_d.set_ylabel("平均リターン (%)", fontsize=10)
+        ax_d.set_title("遅延日数別 平均リターン比較", fontsize=12)
+        fig_d.tight_layout()
+        st.pyplot(fig_d)
+        plt.close(fig_d)
+    except Exception as e:
+        st.warning(f"棒グラフ描画エラー: {e}")
+
+    # 遅延日数別 累積リターン曲線
+    st.markdown("#### 📈 遅延日数別 累積リターン曲線")
+    try:
+        fig_c, ax_c = plt.subplots(figsize=(10, 4))
+        for delay, grp in tf_df.groupby("delay_days"):
+            grp_s = grp.sort_values("entry_date")
+            rets  = grp_s["return(%)"].dropna().astype(float).values
+            if len(rets) == 0:
+                continue
+            cum = np.cumsum(rets)
+            ax_c.plot(range(len(cum)), cum, label=f"遅延{int(delay)}日", linewidth=1.8)
+        ax_c.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax_c.set_xlabel("トレード番号（エントリー日順）", fontsize=10)
+        ax_c.set_ylabel("累積リターン (%)", fontsize=10)
+        ax_c.set_title("遅延日数別 累積リターン曲線", fontsize=12)
+        ax_c.legend(fontsize=9, loc="upper left")
+        fig_c.tight_layout()
+        st.pyplot(fig_c)
+        plt.close(fig_c)
+    except Exception as e:
+        st.warning(f"累積リターングラフ描画エラー: {e}")
+
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    # ② 保有期間分析
+    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    st.divider()
+    st.markdown("### 📅 保有期間分析")
+    st.caption("保有日数とリターンの関係を分析します。長期保有が有利かどうかを検証できます。")
+
+    hold_df = tf_df[["holding_days", "return(%)"]].dropna().copy()
+    hold_df["holding_days"] = pd.to_numeric(hold_df["holding_days"], errors="coerce")
+    hold_df["return(%)"]    = pd.to_numeric(hold_df["return(%)"],    errors="coerce")
+    hold_df = hold_df.dropna()
+
+    if hold_df.empty:
+        st.info("保有日数データがありません。")
+        return
+
+    # 保有日数ごとの平均リターン集計（10日刻みでビニング）
+    try:
+        max_hold  = int(hold_df["holding_days"].max())
+        bin_edges = list(range(0, max_hold + 11, 10))
+        if len(bin_edges) < 2:
+            bin_edges = [0, max_hold + 1]
+
+        hold_df["保有日数帯"] = pd.cut(
+            hold_df["holding_days"],
+            bins=bin_edges,
+            right=False,
+            labels=[f"{b}〜{b+9}日" for b in bin_edges[:-1]],
+        )
+        hold_agg = (
+            hold_df.groupby("保有日数帯", observed=True)["return(%)"]
+            .agg(
+                トレード数   = "count",
+                平均リターン = "mean",
+                勝率         = lambda x: (x > 0).sum() / len(x) * 100,
+            )
+            .round(2)
+            .reset_index()
+        )
+        hold_agg.columns = ["保有日数帯", "トレード数", "平均リターン(%)", "勝率(%)"]
+
+        def _cc_h(val):
+            try:
+                v = float(val)
+                return "color: #4caf50; font-weight:bold" if v > 0 else "color: #f44336; font-weight:bold"
+            except Exception:
+                return ""
+
+        styled_hold = (
+            hold_agg.style
+            .format({"平均リターン(%)": "{:+.2f}%", "勝率(%)": "{:.1f}%"})
+            .map(_cc_h, subset=["平均リターン(%)"])
+        )
+        st.dataframe(styled_hold, use_container_width=True, hide_index=True)
+
+    except Exception as e:
+        st.warning(f"保有日数集計エラー: {e}")
+
+    # holding_days vs return 散布図（遅延日数別に色分け）
+    st.markdown("#### 🔍 保有日数 vs リターン 散布図")
+    try:
+        fig_h, ax_h = plt.subplots(figsize=(8, 4))
+        for delay, grp in tf_df.groupby("delay_days"):
+            hd  = pd.to_numeric(grp["holding_days"], errors="coerce")
+            ret = pd.to_numeric(grp["return(%)"],    errors="coerce")
+            mask = hd.notna() & ret.notna()
+            if mask.sum() == 0:
+                continue
+            ax_h.scatter(hd[mask], ret[mask],
+                         alpha=0.45, s=25, edgecolors="none",
+                         label=f"遅延{int(delay)}日")
+
+        ax_h.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+        ax_h.set_xlabel("保有日数", fontsize=10)
+        ax_h.set_ylabel("リターン (%)", fontsize=10)
+        ax_h.set_title("保有日数 vs リターン（遅延日数別）", fontsize=12)
+        ax_h.legend(fontsize=8, loc="upper right", ncol=2)
+        fig_h.tight_layout()
+        st.pyplot(fig_h)
+        plt.close(fig_h)
+    except Exception as e:
+        st.warning(f"散布図描画エラー: {e}")
+
+
+# ===========================================================================
+# パラメータ最適化: グリッドサーチ実行
+# ===========================================================================
+
+def _run_optimization(
+    tickers:         list[str],
+    period_years:    int,
+    donchian_days:   int,
+    delay_list:      list[int],
+    dd_list:         list[float],
+    vol_ratio_list:  list[float],
+    score_th_list:   list[float],
+    min_trades:      int   = 10,
+    max_dd_floor:    float = -50.0,   # max_dd (%) がこれを下回ったら除外
+) -> pd.DataFrame:
+    """
+    全パラメータ組み合わせでバックテストを実行し、スコア上位の結果を返す。
+
+    score = (total_return / |max_dd|) * sharpe / sqrt(trades)
+
+    フィルター:
+        - trades < min_trades → 除外
+        - max_dd < max_dd_floor(%) → 除外
+
+    戻り値: スコア降順の DataFrame（全組み合わせの結果）
+    """
+    # ---------- Step 1: 各 (delay, dd) でトレードデータを収集 ----------
+    # delay×dd の組み合わせ分だけダウンロードが走らないよう、
+    # max(delay_list) + max(dd_list) でまとめてシミュレーションし後でフィルタリングする。
+    # delayed_backtest_ticker は delay_days_list をまとめて処理するので活用する。
+
+    all_trades_by_delay_dd: dict[tuple, list] = {}
+
+    for dd_pct in dd_list:
+        # 全 delay をまとめて 1回のダウンロードで処理
+        dd_all_trades: list[dict] = []
+        for ticker in tickers:
+            trades, _ = delayed_backtest_ticker(
+                ticker          = ticker,
+                period_years    = period_years,
+                donchian_days   = donchian_days,
+                ema_fast        = 5,
+                ema_slow        = 20,
+                delay_days_list = delay_list,
+                max_dd_pct      = dd_pct,
+            )
+            dd_all_trades.extend(trades)
+
+        for delay in delay_list:
+            key = (delay, dd_pct)
+            all_trades_by_delay_dd[key] = [
+                t for t in dd_all_trades if t.get("delay_days") == delay
+            ]
+
+    # ---------- Step 2: 全パラメータ組み合わせでスコア計算 ----------
+    results = []
+
+    for delay in delay_list:
+        for dd_pct in dd_list:
+            base_trades = all_trades_by_delay_dd.get((delay, dd_pct), [])
+            if not base_trades:
+                continue
+
+            base_df = pd.DataFrame(base_trades)
+            rets_all = pd.to_numeric(base_df["return(%)"], errors="coerce").dropna()
+
+            for vol_ratio in vol_ratio_list:
+                for score_th in score_th_list:
+                    # volume_ratio / score_threshold フィルタ（スコア列が存在しない場合はスキップ）
+                    filtered_df = base_df.copy()
+
+                    # volume_ratio フィルタ（出来高比率列が存在すれば適用）
+                    if "volume_ratio" in filtered_df.columns and vol_ratio > 0:
+                        filtered_df = filtered_df[
+                            pd.to_numeric(filtered_df["volume_ratio"], errors="coerce").fillna(0) >= vol_ratio
+                        ]
+
+                    # score_threshold フィルタ（スコア列が存在すれば適用）
+                    if "score" in filtered_df.columns and score_th > 0:
+                        filtered_df = filtered_df[
+                            pd.to_numeric(filtered_df["score"], errors="coerce").fillna(0) >= score_th
+                        ]
+
+                    rets = pd.to_numeric(filtered_df["return(%)"], errors="coerce").dropna()
+                    n_trades = len(rets)
+
+                    if n_trades < min_trades:
+                        continue
+
+                    total_ret = float(rets.sum())
+                    avg_ret   = float(rets.mean())
+                    std_ret   = float(rets.std())
+
+                    # シャープ比（簡易）
+                    sharpe = avg_ret / std_ret if std_ret > 0 else 0.0
+
+                    # 最大ドローダウン（累積リターン曲線ベース）
+                    cum      = (1 + rets / 100).cumprod()
+                    roll_max = cum.cummax()
+                    max_dd   = float(((cum - roll_max) / roll_max * 100).min())
+
+                    if max_dd < max_dd_floor:
+                        continue
+
+                    # 最適化スコア
+                    abs_dd = abs(max_dd) if max_dd != 0 else 1e-6
+                    opt_score = (total_ret / abs_dd) * sharpe / math.sqrt(n_trades)
+
+                    results.append({
+                        "delay_days":      delay,
+                        "max_dd_guard(%)": dd_pct,
+                        "vol_ratio":       vol_ratio,
+                        "score_threshold": score_th,
+                        "トレード数":      n_trades,
+                        "総リターン(%)":   round(total_ret, 2),
+                        "平均リターン(%)": round(avg_ret, 2),
+                        "勝率(%)":         round(float((rets > 0).sum() / n_trades * 100), 1),
+                        "最大DD(%)":       round(max_dd, 2),
+                        "シャープ比":      round(sharpe, 3),
+                        "最適化スコア":    round(opt_score, 4),
+                        # トレード列を後のグラフ用に保持
+                        "_trades":         filtered_df.to_dict("records"),
+                    })
+
+    if not results:
+        return pd.DataFrame()
+
+    result_df = pd.DataFrame(results).sort_values("最適化スコア", ascending=False).reset_index(drop=True)
+    return result_df
+
+
+# ===========================================================================
+# パラメータ最適化: UI 描画
+# ===========================================================================
+
+def render_param_optimization() -> None:
+    """パラメータ最適化モードのセクション全体を描画する"""
+    st.divider()
+    st.markdown("## 🔬 パラメータ最適化モード")
+    st.markdown("""
+    指定したパラメータ範囲の**全組み合わせ**でバックテストを実行し、最も優れたパラメータ組み合わせを探索します。
+
+    **最適化スコア** = `(総リターン / |最大DD|) × シャープ比 / √トレード数`
+
+    フィルター: トレード数 < 最小件数 → 除外 ／ 最大DD が下限未満 → 除外
+    """)
+
+    # ── 設定パネル ────────────────────────────────────────────────────────
+    st.markdown("### ⚙️ 最適化パラメータ設定")
+
+    op1, op2 = st.columns(2)
+    with op1:
+        opt_period = st.selectbox(
+            "📅 検証期間",
+            options=[1, 3, 5], index=1,
+            format_func=lambda x: f"{x}年",
+            key="opt_period",
+        )
+        opt_donchian = st.number_input(
+            "📐 ドンチャン期間（固定）",
+            min_value=5, max_value=60, value=20, step=1,
+            key="opt_donchian",
+        )
+        opt_min_trades = st.number_input(
+            "📊 最小トレード数（フィルター）",
+            min_value=1, max_value=200, value=10, step=1,
+            help="この件数を下回るパラメータ組み合わせは除外",
+            key="opt_min_trades",
+        )
+        opt_max_dd_floor = st.number_input(
+            "🛡️ 最大DD下限（%）フィルター",
+            min_value=-100.0, max_value=0.0, value=-50.0, step=1.0, format="%.1f",
+            help="最大DDがこの値を下回る組み合わせは除外（例: -50 → 最大DD<-50% なら除外）",
+            key="opt_max_dd_floor",
+        )
+
+    with op2:
+        opt_delay_raw = st.text_input(
+            "⏱️ delay_days 候補（カンマ区切り）",
+            value="0, 3, 5, 10, 20",
+            key="opt_delay_raw",
+            help="例: 0, 3, 5, 10, 20, 30",
+        )
+        opt_dd_raw = st.text_input(
+            "🛡️ waiting_dd 候補（カンマ区切り）",
+            value="3.0, 5.0, 10.0",
+            key="opt_dd_raw",
+            help="例: 3.0, 5.0, 10.0, 15.0  ← 待機期間中の許容DD(%)",
+        )
+        opt_vol_raw = st.text_input(
+            "📦 volume_ratio 候補（カンマ区切り）",
+            value="0.0",
+            key="opt_vol_raw",
+            help="例: 0.0, 1.0, 1.5, 2.0  ← 0.0 = フィルターなし（volume_ratio列が必要）",
+        )
+        opt_score_raw = st.text_input(
+            "🎯 score_threshold 候補（カンマ区切り）",
+            value="0.0",
+            key="opt_score_raw",
+            help="例: 0.0, 30, 50, 70  ← 0.0 = フィルターなし（score列が必要）",
+        )
+
+    # ── 銘柄リスト ─────────────────────────────────────────────────────
+    st.markdown("### 📋 銘柄リスト")
+    opt_ticker_raw = st.text_area(
+        "銘柄コード（カンマ区切り）",
+        value="7203, 9984, 6758, 8306, 9433",
+        height=60,
+        key="opt_ticker_area",
+        label_visibility="collapsed",
+        help="4桁数字も可（7203 → 7203.T に自動変換）",
+    )
+    opt_raw = [t.strip() for t in opt_ticker_raw.split(",") if t.strip()]
+    st.caption(f"銘柄数: **{len(opt_raw)}** 件")
+
+    # ── 推定計算量 ─────────────────────────────────────────────────────
+    def _parse_floats(raw: str) -> list[float]:
+        vals = []
+        for v in raw.split(","):
+            v = v.strip()
+            try:
+                vals.append(float(v))
+            except ValueError:
+                pass
+        return vals or [0.0]
+
+    def _parse_ints(raw: str) -> list[int]:
+        vals = []
+        for v in raw.split(","):
+            v = v.strip()
+            try:
+                vals.append(int(float(v)))
+            except ValueError:
+                pass
+        return vals or [0]
+
+    d_list  = _parse_ints(opt_delay_raw)
+    dd_list = _parse_floats(opt_dd_raw)
+    vr_list = _parse_floats(opt_vol_raw)
+    st_list = _parse_floats(opt_score_raw)
+    n_combo = len(d_list) * len(dd_list) * len(vr_list) * len(st_list)
+    n_dl    = len(d_list) * len(dd_list)   # 実際のダウンロード = dd × tickers
+
+    st.caption(
+        f"パラメータ組み合わせ数: **{n_combo}** 件 ／ "
+        f"バックテスト実行回数: **{len(opt_raw) * len(dd_list)}** 回 "
+        f"（遅延日数は 1回のダウンロードで一括処理）"
+    )
+
+    # ── 実行 / クリア ─────────────────────────────────────────────────
+    ob1, ob2, _ = st.columns([0.28, 0.12, 0.60])
+    with ob1:
+        opt_run = st.button("🚀 最適化実行", type="primary",
+                            use_container_width=True, key="opt_run_btn")
+    with ob2:
+        if st.button("クリア", key="opt_clear_btn", use_container_width=True):
+            st.session_state.opt_results = None
+            st.rerun()
+
+    # ── 実行処理 ──────────────────────────────────────────────────────
+    if opt_run:
+        if not opt_raw:
+            st.warning("銘柄コードを入力してください。")
+        elif n_combo == 0:
+            st.warning("パラメータ候補を1つ以上入力してください。")
+        else:
+            tickers = [normalize_ticker(t) for t in opt_raw]
+            total_steps = len(tickers) * len(dd_list)
+
+            prog = st.progress(0, text=f"最適化開始... (0 / {total_steps} バックテスト)")
+            stat = st.empty()
+            step = 0
+
+            # dd × ticker ループ（遅延は delay_days_list として一括）
+            all_trades_by_key: dict[tuple, list] = {
+                (delay, dd): [] for delay in d_list for dd in dd_list
+            }
+            errors: list[str] = []
+
+            for dd_pct in dd_list:
+                for ticker in tickers:
+                    prog.progress(
+                        step / max(total_steps, 1),
+                        text=f"処理中... ({step + 1}/{total_steps})  {ticker}  DD≤{dd_pct}%",
+                    )
+                    stat.caption(f"🔍 {ticker} | waiting_dd={dd_pct}%")
+
+                    trades, err = delayed_backtest_ticker(
+                        ticker          = ticker,
+                        period_years    = int(opt_period),
+                        donchian_days   = int(opt_donchian),
+                        ema_fast        = 5,
+                        ema_slow        = 20,
+                        delay_days_list = d_list,
+                        max_dd_pct      = dd_pct,
+                    )
+                    if err:
+                        errors.append(f"{ticker} (DD={dd_pct}%): {err}")
+                    for t in trades:
+                        key = (t.get("delay_days"), dd_pct)
+                        if key in all_trades_by_key:
+                            all_trades_by_key[key].append(t)
+
+                    step += 1
+
+            prog.progress(1.0, text="✅ バックテスト完了。スコア計算中...")
+            stat.empty()
+
+            if errors:
+                with st.expander(f"⚠️ スキップされた銘柄 ({len(errors)} 件)"):
+                    for e in errors:
+                        st.caption(e)
+
+            # スコア計算
+            results = []
+            for delay in d_list:
+                for dd_pct in dd_list:
+                    base_trades = all_trades_by_key.get((delay, dd_pct), [])
+                    if not base_trades:
+                        continue
+                    base_df = pd.DataFrame(base_trades)
+
+                    for vol_ratio in vr_list:
+                        for score_th in st_list:
+                            filtered_df = base_df.copy()
+
+                            if "volume_ratio" in filtered_df.columns and vol_ratio > 0:
+                                filtered_df = filtered_df[
+                                    pd.to_numeric(filtered_df["volume_ratio"], errors="coerce").fillna(0) >= vol_ratio
+                                ]
+                            if "score" in filtered_df.columns and score_th > 0:
+                                filtered_df = filtered_df[
+                                    pd.to_numeric(filtered_df["score"], errors="coerce").fillna(0) >= score_th
+                                ]
+
+                            rets = pd.to_numeric(filtered_df["return(%)"], errors="coerce").dropna()
+                            n_tr = len(rets)
+
+                            if n_tr < int(opt_min_trades):
+                                continue
+
+                            total_ret = float(rets.sum())
+                            avg_ret   = float(rets.mean())
+                            std_ret   = float(rets.std())
+                            sharpe    = avg_ret / std_ret if std_ret > 0 else 0.0
+
+                            cum      = (1 + rets / 100).cumprod()
+                            roll_max = cum.cummax()
+                            max_dd   = float(((cum - roll_max) / roll_max * 100).min())
+
+                            if max_dd < float(opt_max_dd_floor):
+                                continue
+
+                            abs_dd    = abs(max_dd) if max_dd != 0 else 1e-6
+                            opt_score = (total_ret / abs_dd) * sharpe / math.sqrt(n_tr)
+
+                            results.append({
+                                "delay_days":      delay,
+                                "max_dd_guard(%)": dd_pct,
+                                "vol_ratio":       vol_ratio,
+                                "score_threshold": score_th,
+                                "トレード数":      n_tr,
+                                "総リターン(%)":   round(total_ret, 2),
+                                "平均リターン(%)": round(avg_ret, 2),
+                                "勝率(%)":         round(float((rets > 0).sum() / n_tr * 100), 1),
+                                "最大DD(%)":       round(max_dd, 2),
+                                "シャープ比":      round(sharpe, 3),
+                                "最適化スコア":    round(opt_score, 4),
+                                "_rets":           rets.tolist(),
+                            })
+
+            if results:
+                res_df = pd.DataFrame(results).sort_values(
+                    "最適化スコア", ascending=False
+                ).reset_index(drop=True)
+                st.session_state.opt_results = res_df
+            else:
+                st.session_state.opt_results = pd.DataFrame()
+
+            st.rerun()
+
+    # ── 結果表示 ──────────────────────────────────────────────────────
+    if st.session_state.get("opt_results") is None:
+        return
+
+    opt_df = st.session_state.opt_results
+    st.divider()
+
+    if opt_df.empty:
+        st.info("🔍 条件を満たすパラメータ組み合わせが見つかりませんでした。フィルター条件を緩めてください。")
+        return
+
+    st.markdown(f"### 🏆 最適化結果（全 {len(opt_df)} 組み合わせ）")
+    st.caption(
+        "最適化スコア = (総リターン / |最大DD|) × シャープ比 / √トレード数。"
+        "スコアが高いほど「効率的かつ安定したリターン」を達成したパラメータ組み合わせです。"
+    )
+
+    # ── スコア上位10件テーブル ────────────────────────────────────────
+    st.markdown("#### 🥇 スコア上位 10 件")
+    top10 = opt_df.head(10).drop(columns=["_rets"], errors="ignore")
+
+    def _cc_opt(val):
+        try:
+            v = float(val)
+            return "color: #4caf50; font-weight:bold" if v > 0 else "color: #f44336; font-weight:bold"
+        except Exception:
+            return ""
+
+    fmt_opt = {
+        "総リターン(%)":   "{:+.2f}%",
+        "平均リターン(%)": "{:+.2f}%",
+        "勝率(%)":         "{:.1f}%",
+        "最大DD(%)":       "{:+.2f}%",
+        "シャープ比":      "{:.3f}",
+        "最適化スコア":    "{:.4f}",
+    }
+    pos_cols = ["総リターン(%)", "平均リターン(%)"]
+    styled_top = (
+        top10.style
+        .format({k: v for k, v in fmt_opt.items() if k in top10.columns})
+        .map(_cc_opt, subset=[c for c in pos_cols if c in top10.columns])
+    )
+    st.dataframe(styled_top, use_container_width=True, hide_index=True)
+
+    # ── 全件ダウンロード ─────────────────────────────────────────────
+    csv_data = opt_df.drop(columns=["_rets"], errors="ignore").to_csv(index=False, encoding="utf-8-sig")
+    st.download_button(
+        label="📥 全結果 CSV ダウンロード",
+        data=csv_data,
+        file_name="optimization_results.csv",
+        mime="text/csv",
+        key="opt_download",
+    )
+
+    # ── 各パラメータ別の平均スコア（棒グラフ）────────────────────────
+    st.markdown("#### 📊 パラメータ別 平均スコア分析")
+    param_cols = ["delay_days", "max_dd_guard(%)", "vol_ratio", "score_threshold"]
+    param_labels = {
+        "delay_days":      "遅延日数",
+        "max_dd_guard(%)": "許容DD(%)",
+        "vol_ratio":       "出来高比率",
+        "score_threshold": "スコア閾値",
+    }
+
+    try:
+        n_param_plots = len([c for c in param_cols if c in opt_df.columns])
+        if n_param_plots > 0:
+            fig_p, axes_p = plt.subplots(1, n_param_plots, figsize=(4 * n_param_plots, 3.5))
+            if n_param_plots == 1:
+                axes_p = [axes_p]
+            plot_idx = 0
+            for col in param_cols:
+                if col not in opt_df.columns:
+                    continue
+                ax = axes_p[plot_idx]
+                grp = opt_df.groupby(col)["最適化スコア"].mean().reset_index()
+                labels = [str(v) for v in grp[col].values]
+                scores = grp["最適化スコア"].values
+                colors = ["#2196F3" if s >= 0 else "#f44336" for s in scores]
+                ax.bar(labels, scores, color=colors)
+                ax.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+                ax.set_xlabel(param_labels.get(col, col), fontsize=9)
+                ax.set_ylabel("平均スコア", fontsize=9)
+                ax.set_title(f"{param_labels.get(col, col)}別", fontsize=10)
+                ax.tick_params(axis="x", labelsize=8, rotation=15)
+                plot_idx += 1
+            fig_p.tight_layout()
+            st.pyplot(fig_p)
+            plt.close(fig_p)
+    except Exception as e:
+        st.warning(f"パラメータ別グラフ描画エラー: {e}")
+
+    # ── 上位 N 件の累積リターングラフ ────────────────────────────────
+    st.markdown("#### 📈 上位パラメータ組み合わせ 累積リターン曲線")
+    n_top_chart = st.slider(
+        "グラフに表示する上位件数",
+        min_value=1, max_value=min(10, len(opt_df)), value=min(5, len(opt_df)),
+        key="opt_top_n_slider",
+    )
+
+    try:
+        fig_c2, ax_c2 = plt.subplots(figsize=(10, 4))
+        plotted = 0
+        for idx, row in opt_df.head(n_top_chart).iterrows():
+            rets_list = row.get("_rets", [])
+            if not rets_list:
+                continue
+            rets_arr = np.array(rets_list, dtype=float)
+            cum = np.cumsum(rets_arr)
+            label = (
+                f"#{idx+1} 遅延{int(row['delay_days'])}日 "
+                f"DD{row['max_dd_guard(%)']}% "
+                f"Sc={row['最適化スコア']:.3f}"
+            )
+            ax_c2.plot(range(len(cum)), cum, linewidth=1.8, label=label)
+            plotted += 1
+
+        if plotted == 0:
+            ax_c2.text(0.5, 0.5, "データなし", ha="center", va="center",
+                       transform=ax_c2.transAxes, fontsize=14)
+        else:
+            ax_c2.axhline(0, color="gray", linewidth=0.8, linestyle="--")
+            ax_c2.set_xlabel("トレード番号（エントリー日順）", fontsize=10)
+            ax_c2.set_ylabel("累積リターン (%)", fontsize=10)
+            ax_c2.set_title("上位パラメータ組み合わせ 累積リターン比較", fontsize=12)
+            ax_c2.legend(fontsize=7, loc="upper left", ncol=1)
+
+        fig_c2.tight_layout()
+        st.pyplot(fig_c2)
+        plt.close(fig_c2)
+    except Exception as e:
+        st.warning(f"累積リターングラフ描画エラー: {e}")
+
+    # ── スコア分布ヒストグラム ────────────────────────────────────────
+    st.markdown("#### 📉 最適化スコア分布")
+    try:
+        fig_hist, ax_hist = plt.subplots(figsize=(8, 3))
+        scores_all = opt_df["最適化スコア"].dropna().astype(float)
+        ax_hist.hist(scores_all, bins=30, color="#2196F3", edgecolor="white", alpha=0.85)
+        ax_hist.axvline(float(scores_all.median()), color="orange",
+                        linewidth=1.5, linestyle="--", label=f"中央値 {float(scores_all.median()):.3f}")
+        ax_hist.set_xlabel("最適化スコア", fontsize=10)
+        ax_hist.set_ylabel("頻度", fontsize=10)
+        ax_hist.set_title("全パラメータ組み合わせのスコア分布", fontsize=12)
+        ax_hist.legend(fontsize=9)
+        fig_hist.tight_layout()
+        st.pyplot(fig_hist)
+        plt.close(fig_hist)
+    except Exception as e:
+        st.warning(f"ヒストグラム描画エラー: {e}")
+
+
+# ===========================================================================
+# メイン
+# ===========================================================================
+
+def main() -> None:
+    init_state()
+
+    st.markdown("""
+    <style>
+    div[data-testid="stHorizontalBlock"] > div:nth-last-child(-n+4) .stButton > button {
+        height: 35px !important;
+        min-height: 35px !important;
+        padding: 0 2px !important;
+        font-size: 12px !important;
+        line-height: 1 !important;
+        border-radius: 4px !important;
+    }
+    div[data-testid="stHorizontalBlock"] > div:nth-last-child(-n+4) [data-testid="stVerticalBlock"] {
+        gap: 1px !important;
+    }
+    /* タブバーを固定 */
+    .stTabs [data-baseweb="tab-list"] {
+        position: -webkit-sticky !important;
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 9999 !important;
+        background-color: white !important;
+        padding-bottom: 4px !important;
+    }
+    [data-theme="dark"] .stTabs [data-baseweb="tab-list"] {
+        background-color: #0e1117 !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🔍 スクリーニング",
+        "👀 監視銘柄",
+        "💼 ポジション管理",
+        "📈 バックテスト",
+    ])
+
+    with tab1:
+        render_screener_tab()
+
+    with tab2:
+        render_funda_tab()
+
+    with tab3:
+        render_position_tab()
+
+    with tab4:
+        render_backtest_tab()
+
+
+if __name__ == "__main__":
+    main()
