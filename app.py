@@ -12,7 +12,9 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import requests as _req
+import anthropic as _anthropic
 import pandas as pd
 import numpy as np
 import matplotlib
@@ -1715,6 +1717,236 @@ def _health_badge(score) -> str:
     )
 
 
+# ===========================================================================
+# AI銘柄分析エンジン（Claude + EdinetDB MCP）
+# ===========================================================================
+
+_PROMPTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompts")
+
+# Claude に渡す EdinetDB ツール定義
+_EDINET_TOOL_DEFS: list[dict] = [
+    {
+        "name": "search_companies",
+        "description": "企業名・証券コード・業種で企業を検索し EDINETコードを返す。証券コード（4桁）から EDINETコードを取得する際に必ず最初に呼ぶ。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "企業名または証券コード（例: '7203' または 'トヨタ'）"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_company",
+        "description": "企業の基本情報・最新財務・財務健全性スコア(0-100)・直近決算(latestEarnings)を返す。必ず search_companies で取得した edinetCode を使うこと。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edinet_code": {"type": "string", "description": "EDINETコード（例: 'E02144'）"},
+            },
+            "required": ["edinet_code"],
+        },
+    },
+    {
+        "name": "get_financials",
+        "description": "最大6年分の財務時系列データ（売上/営業利益/純利益/EPS/ROE等121フィールド）を返す。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edinet_code": {"type": "string"},
+                "years":       {"type": "integer", "description": "取得年数（最大6）", "default": 5},
+                "period":      {"type": "string",  "description": "'quarterly' で四半期データ"},
+            },
+            "required": ["edinet_code"],
+        },
+    },
+    {
+        "name": "get_earnings",
+        "description": "TDNet決算短信データを前年同期比付きで返す。直近決算の確認に使う。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edinet_code": {"type": "string"},
+                "limit":       {"type": "integer", "description": "取得件数（デフォルト8）", "default": 8},
+            },
+            "required": ["edinet_code"],
+        },
+    },
+    {
+        "name": "get_shareholders",
+        "description": "大量保有報告書から株主構成を返す。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edinet_code": {"type": "string"},
+            },
+            "required": ["edinet_code"],
+        },
+    },
+    {
+        "name": "get_analysis",
+        "description": "AI財務分析・業種ベンチマーク比較・財務健全性スコアの詳細解説を返す。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edinet_code": {"type": "string"},
+            },
+            "required": ["edinet_code"],
+        },
+    },
+    {
+        "name": "get_text_blocks",
+        "description": "有価証券報告書の全文テキスト（事業状況・リスク・経営者分析）を返す。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edinet_code":  {"type": "string"},
+                "fiscal_year":  {"type": "integer", "description": "年度（省略時は最新）"},
+                "full":         {"type": "boolean", "description": "true で全文取得"},
+            },
+            "required": ["edinet_code"],
+        },
+    },
+    {
+        "name": "screen_companies",
+        "description": "121の財務指標で多条件スクリーニングを実施。同業他社比較に使う。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "conditions": {
+                    "type": "array",
+                    "description": "スクリーニング条件リスト",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "metric":   {"type": "string"},
+                            "operator": {"type": "string", "enum": ["gte","lte","gt","lt","eq"]},
+                            "value":    {"type": "number"},
+                        },
+                    },
+                },
+                "industry": {"type": "string"},
+                "sort":     {"type": "string"},
+                "order":    {"type": "string", "enum": ["asc","desc"]},
+                "limit":    {"type": "integer", "default": 20},
+            },
+        },
+    },
+    {
+        "name": "search_companies_batch",
+        "description": "複数銘柄の情報を一括取得。同業他社比較表の作成に使う。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "codes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "EDINETコードまたは証券コードの配列",
+                },
+            },
+            "required": ["codes"],
+        },
+    },
+    {
+        "name": "get_ranking",
+        "description": "ROE・PER・配当利回りなど18指標のランキングを返す。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string", "description": "指標名（roe/per/dividend-yield/health-score等）"},
+                "limit":  {"type": "integer", "default": 30},
+            },
+            "required": ["metric"],
+        },
+    },
+    {
+        "name": "get_segments",
+        "description": "セグメント別業績データを返す。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edinet_code": {"type": "string"},
+            },
+            "required": ["edinet_code"],
+        },
+    },
+    {
+        "name": "get_earnings_calendar",
+        "description": "JPX決算発表スケジュールを返す。",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "対象日付 YYYY-MM-DD（省略時は近日分）"},
+            },
+        },
+    },
+]
+
+
+def load_prompt_templates() -> dict[str, str]:
+    """prompts/ ディレクトリの .md ファイルを {ファイル名: 内容} で返す。"""
+    templates: dict[str, str] = {}
+    if not os.path.isdir(_PROMPTS_DIR):
+        return templates
+    for fname in sorted(os.listdir(_PROMPTS_DIR)):
+        if fname.endswith(".md") and fname != "README.md":
+            path = os.path.join(_PROMPTS_DIR, fname)
+            try:
+                with open(path, encoding="utf-8") as f:
+                    templates[fname[:-3]] = f.read()   # key = ファイル名（拡張子なし）
+            except Exception:
+                pass
+    return templates
+
+
+def run_edinet_analysis(prompt: str, api_key: str, status_placeholder) -> str:
+    """
+    Claude (claude-opus-4-5) に EdinetDB ツールを与えて銘柄分析を実行する。
+    tool_use ループを回して最終テキストを返す。
+    """
+    client = _anthropic.Anthropic(api_key=api_key)
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    iteration = 0
+
+    while True:
+        iteration += 1
+        status_placeholder.info(f"🤖 Claude が分析中... (ステップ {iteration})")
+
+        response = client.messages.create(
+            model="claude-opus-4-5",
+            max_tokens=8192,
+            tools=_EDINET_TOOL_DEFS,
+            messages=messages,
+        )
+
+        if response.stop_reason == "tool_use":
+            # ツール呼び出しを実行
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    status_placeholder.info(
+                        f"🔧 EdinetDB ツール呼び出し中: `{block.name}` (ステップ {iteration})"
+                    )
+                    raw = _call_edinetdb(block.name, **block.input)
+                    tool_results.append({
+                        "type":        "tool_result",
+                        "tool_use_id": block.id,
+                        "content":     json.dumps(raw, ensure_ascii=False),
+                    })
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user",      "content": tool_results})
+
+        else:
+            # 最終テキスト応答
+            return "".join(
+                block.text for block in response.content
+                if hasattr(block, "text")
+            )
+
+        if iteration > 15:   # 無限ループ防止
+            return "⚠️ ツール呼び出し回数が上限(15回)を超えました。"
+
+
 def save_funda_data(df: pd.DataFrame) -> None:
     """ファンダデータを CSV に保存する"""
     df.to_csv(FUNDA_FILE, index=False, encoding="utf-8-sig")
@@ -2072,6 +2304,129 @@ def render_funda_tab() -> None:
             st.success("✅ 再取得完了")
             st.rerun()
 
+    # ════════════════════════════════════════════════════════════════════════
+    # ④ AI銘柄分析（Claude + EdinetDB）
+    # ════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### 🤖 AI銘柄分析")
+    st.caption("プロンプトテンプレートを選んで実行すると、Claude が EdinetDB から情報を収集して分析レポートを生成します。")
+
+    # ── APIキー入力 ──────────────────────────────────────────────────────
+    _api_key = st.text_input(
+        "Anthropic APIキー",
+        value=st.session_state.get("anthropic_api_key", ""),
+        type="password",
+        placeholder="sk-ant-...",
+        key="ai_api_key_input",
+    )
+    if _api_key:
+        st.session_state.anthropic_api_key = _api_key
+
+    # ── テンプレート選択 ─────────────────────────────────────────────────
+    _templates = load_prompt_templates()
+    _template_labels = {
+        "stock_analysis":  "📊 総合分析レポート",
+        "peer_compare":    "🔀 同業他社比較",
+        "shareholder_scan":"👥 株主構成スキャン",
+        "screening_deep":  "🔍 財務スクリーニング深掘り",
+        "watchlist_review":"📋 監視銘柄一括レビュー",
+        "earnings_check":  "📈 直近決算速報チェック",
+        "risk_analysis":   "⚠️ 事業リスク・競合分析",
+        "valuation":       "💰 バリュエーション評価",
+        "growth_check":    "🚀 成長性チェック",
+    }
+
+    _ai_c1, _ai_c2 = st.columns([0.5, 0.5])
+    with _ai_c1:
+        _tmpl_options = list(_templates.keys())
+        _tmpl_display = [_template_labels.get(k, k) for k in _tmpl_options]
+        _sel_idx = st.selectbox(
+            "分析テンプレート",
+            options=range(len(_tmpl_options)),
+            format_func=lambda i: _tmpl_display[i],
+            key="ai_template_select",
+        )
+        _selected_tmpl_key = _tmpl_options[_sel_idx] if _tmpl_options else None
+
+    with _ai_c2:
+        # 監視銘柄リストから選択 or 直接入力
+        _watch_codes = fund_df["code"].dropna().tolist() if "code" in fund_df.columns else []
+        _watch_clean = [c.replace(".T","").replace(".t","") for c in _watch_codes]
+        _name_opts   = [
+            f"{c}  {_funda_name_map.get(c, '')}" for c in _watch_clean
+        ]
+        if _name_opts:
+            _sel_stock_idx = st.selectbox(
+                "対象銘柄（監視リストから選択）",
+                options=range(len(_name_opts)),
+                format_func=lambda i: _name_opts[i],
+                key="ai_stock_select",
+            )
+            _target_code = _watch_clean[_sel_stock_idx]
+        else:
+            _target_code = ""
+
+        _manual_code = st.text_input(
+            "または直接入力（証券コード4桁）",
+            placeholder="例: 7203",
+            key="ai_manual_code",
+        )
+        if _manual_code.strip():
+            _target_code = _manual_code.strip()
+
+    # ── プロンプトプレビュー（編集可能）──────────────────────────────────
+    if _selected_tmpl_key and _templates:
+        _raw_tmpl = _templates[_selected_tmpl_key]
+        _filled   = _raw_tmpl.replace("{{TARGET_CODE}}", _target_code or "（銘柄コード未設定）")
+        _edited_prompt = st.text_area(
+            "📋 プロンプト（編集可能）",
+            value=_filled,
+            height=220,
+            key="ai_prompt_editor",
+        )
+    else:
+        st.warning("prompts/ ディレクトリにテンプレートが見つかりません。")
+        _edited_prompt = ""
+
+    # ── 実行ボタン ───────────────────────────────────────────────────────
+    _run_disabled = not (
+        st.session_state.get("anthropic_api_key") and _edited_prompt and _target_code
+    )
+    if st.button("🔍 分析実行", type="primary", disabled=_run_disabled, key="ai_run_btn"):
+        _status_ph  = st.empty()
+        _result_ph  = st.empty()
+        try:
+            _analysis_result = run_edinet_analysis(
+                prompt=_edited_prompt,
+                api_key=st.session_state.anthropic_api_key,
+                status_placeholder=_status_ph,
+            )
+            _status_ph.empty()
+            st.session_state["ai_last_result"]      = _analysis_result
+            st.session_state["ai_last_result_code"] = _target_code
+            st.session_state["ai_last_tmpl"]        = _selected_tmpl_key
+        except Exception as _e:
+            _status_ph.error(f"エラーが発生しました: {_e}")
+
+    # ── 分析結果表示 ──────────────────────────────────────────────────────
+    if st.session_state.get("ai_last_result"):
+        _res_code = st.session_state.get("ai_last_result_code", "")
+        _res_tmpl = st.session_state.get("ai_last_tmpl", "")
+        _res_label = _template_labels.get(_res_tmpl, _res_tmpl)
+        st.divider()
+        _rh1, _rh2 = st.columns([0.8, 0.2])
+        with _rh1:
+            st.markdown(f"#### 📄 分析結果　`{_res_code}` ／ {_res_label}")
+        with _rh2:
+            st.download_button(
+                "📥 MDダウンロード",
+                data=st.session_state["ai_last_result"],
+                file_name=f"analysis_{_res_code}_{_res_tmpl}.md",
+                mime="text/markdown",
+                key="ai_dl_btn",
+            )
+        with st.container(border=True):
+            st.markdown(st.session_state["ai_last_result"])
 
 
 # ===========================================================================
