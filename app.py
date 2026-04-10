@@ -2354,6 +2354,7 @@ def backtest_ticker(
 
         # numpy 配列に変換（ループ内の高速アクセス用）
         close_arr    = df["Close"].to_numpy(dtype=float)
+        open_arr     = df["Open"].to_numpy(dtype=float)
         high_arr     = df["High"].to_numpy(dtype=float)
         low_arr      = df["Low"].to_numpy(dtype=float)
         vol_arr      = df["Volume"].to_numpy(dtype=float)
@@ -2386,31 +2387,42 @@ def backtest_ticker(
 
                 exited     = False
                 exit_price = 0.0
+                exit_bar   = i
+                exit_dt    = str(dates[i].date())
                 reason     = ""
 
-                # EMA(fast) < EMA(slow) → デッドクロス: 当日終値で決済
+                # EMA(fast) < EMA(slow) → デッドクロス: 翌日始値で決済
                 if not np.isnan(ef) and not np.isnan(es) and ef < es:
-                    exit_price = close_arr[i]
-                    reason     = "ema_cross"
-                    exited     = True
-                # データ最終日に保有中 → 終値で決済
+                    if i + 1 < n:
+                        exit_price = float(open_arr[i + 1])
+                        exit_bar   = i + 1
+                        exit_dt    = str(dates[i + 1].date())
+                    else:
+                        exit_price = float(close_arr[i])   # 最終日は終値
+                        exit_bar   = i
+                        exit_dt    = str(dates[i].date())
+                    reason = "ema_cross"
+                    exited = True
+                # データ最終日に保有中 → 終値で決済（翌日データなし）
                 elif i == n - 1:
-                    exit_price = close_arr[i]
+                    exit_price = float(close_arr[i])
+                    exit_bar   = i
+                    exit_dt    = str(dates[i].date())
                     reason     = "end_of_data"
                     exited     = True
 
                 if exited:
-                    holding_days = i - entry_i
+                    holding_days = exit_bar - entry_i
                     ret          = (exit_price - entry_price) / entry_price * 100
                     # 最後に追加したトレード record を完成させる
                     trades[-1].update({
-                        "exit_date":    str(dates[i].date()),
+                        "exit_date":    exit_dt,
                         "exit_price":   round(float(exit_price), 4),
                         "return(%)":    round(ret, 2),
                         "holding_days": holding_days,
                         "exit_reason":  reason,
                     })
-                    last_exit_i = i
+                    last_exit_i = exit_bar
                     in_trade    = False
 
             # ──────────────────────────────────────────────────────────────
@@ -2441,10 +2453,13 @@ def backtest_ticker(
                 if np.isnan(ema_fast_arr[i]) or np.isnan(ema_slow_arr[i]):
                     continue
 
-                # ── エントリー（当日終値） ────────────────────────────────
+                # ── エントリー（翌日始値） ────────────────────────────────
+                # 翌日データが存在しない場合はスキップ
+                if i + 1 >= n:
+                    continue
                 in_trade    = True
-                entry_i     = i
-                entry_price = float(close_arr[i])
+                entry_i     = i + 1                        # 実際の約定バー（翌日）
+                entry_price = float(open_arr[i + 1])       # 翌日始値
 
                 # ── エントリー時点のスコア構成要素 ───────────────────────
                 avg_v   = avg_vol_arr[i]
@@ -2476,7 +2491,7 @@ def backtest_ticker(
 
                 trades.append({
                     "ティッカー":   ticker,
-                    "entry_date":   str(dates[i].date()),
+                    "entry_date":   str(dates[i + 1].date()),   # 翌日の日付
                     "entry_price":  round(entry_price, 4),
                     "exit_date":    None,    # 決済後に更新
                     "exit_price":   None,
