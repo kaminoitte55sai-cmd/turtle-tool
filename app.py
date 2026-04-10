@@ -2197,12 +2197,22 @@ def render_funda_tab() -> None:
             _target_code = _manual_code.strip()
 
     # ── プロンプトプレビュー（編集可能）──────────────────────────────────
+    # テンプレートまたは銘柄コードが変わったら session_state のテキストを上書きする
+    # （st.text_area は key が同じだと value 引数より session_state が優先されるため）
     if _selected_tmpl_key and _templates:
         _raw_tmpl = _templates[_selected_tmpl_key]
         _filled   = _raw_tmpl.replace("{{TARGET_CODE}}", _target_code or "（銘柄コード未設定）")
+
+        _prev_tmpl = st.session_state.get("_ai_prev_tmpl", "")
+        _prev_code = st.session_state.get("_ai_prev_code", "")
+        if _selected_tmpl_key != _prev_tmpl or _target_code != _prev_code:
+            # 変化を検知 → テキストエリアの内容を強制更新
+            st.session_state["ai_prompt_editor"]  = _filled
+            st.session_state["_ai_prev_tmpl"]     = _selected_tmpl_key
+            st.session_state["_ai_prev_code"]     = _target_code
+
         _edited_prompt = st.text_area(
             "📋 プロンプト（編集可能）",
-            value=_filled,
             height=240,
             key="ai_prompt_editor",
         )
