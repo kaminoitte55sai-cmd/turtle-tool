@@ -3290,140 +3290,389 @@ def _parse_csv_tickers(uploaded_file) -> tuple[list[str], str | None]:
 
 
 # ===========================================================================
-# 画面描画: 決算レポートタブ
+# 画面描画: 決算カレンダータブ
 # ===========================================================================
 
-_REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
-_LOGS_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+_REPORTS_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+_EARNINGS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "earnings_results.json")
+_TASK_NAME      = "TurtleTool_EarningsCalendar"   # Windows タスクスケジューラ タスク名
 
 
-def _list_reports() -> list[str]:
-    """reports/ 内の YYYY-MM-DD.md を新しい順に返す。"""
-    if not os.path.isdir(_REPORTS_DIR):
-        return []
-    files = [f for f in os.listdir(_REPORTS_DIR) if f.endswith(".md")]
-    files.sort(reverse=True)
-    return files
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_earnings_calendar(date_str: str) -> list[dict]:
+    """EdinetDB から指定日の決算発表一覧を取得してリストで返す。"""
+    result = _call_edinetdb("get_earnings_calendar", date=date_str)
+    # レスポンス形式: {"companies": [...]} or {"earnings": [...]}
+    for key in ("companies", "earnings", "data"):
+        if key in result and isinstance(result[key], list):
+            return result[key]
+    return []
 
 
-def _load_report(filename: str) -> str:
-    """reports/{filename} の内容を返す。"""
+def _save_earnings_results(date_str: str, rows: list[dict]) -> None:
+    """取得した決算一覧を earnings_results.json に追記保存する。"""
     try:
-        with open(os.path.join(_REPORTS_DIR, filename), encoding="utf-8") as f:
-            return f.read()
+        existing: dict = {}
+        if os.path.exists(_EARNINGS_FILE):
+            with open(_EARNINGS_FILE, encoding="utf-8") as f:
+                existing = json.load(f)
+        existing[date_str] = rows
+        with open(_EARNINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(existing, f, ensure_ascii=False, indent=2)
     except Exception:
-        return ""
+        pass
 
+
+def _load_saved_earnings(date_str: str) -> list[dict]:
+    """earnings_results.json から指定日のデータを読み込む。"""
+    try:
+        with open(_EARNINGS_FILE, encoding="utf-8") as f:
+            return json.load(f).get(date_str, [])
+    except Exception:
+        return []
+
+
+def _list_saved_dates() -> list[str]:
+    """earnings_results.json に保存済みの日付一覧を新しい順で返す。"""
+    try:
+        with open(_EARNINGS_FILE, encoding="utf-8") as f:
+            keys = list(json.load(f).keys())
+        return sorted(keys, reverse=True)
+    except Exception:
+        return []
+
+
+# ── Windows タスクスケジューラ ヘルパー ─────────────────────────────────────
+
+def _task_status() -> str:
+    """タスクの登録状態を返す: 'running' / 'ready' / 'none' / 'error'"""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"(Get-ScheduledTask -TaskName '{_TASK_NAME}' -ErrorAction SilentlyContinue).State"],
+            capture_output=True, text=True, timeout=8,
+        )
+        state = r.stdout.strip().lower()
+        if not state:
+            return "none"
+        return state   # 'ready', 'running', 'disabled', etc.
+    except Exception:
+        return "error"
+
+
+def _task_register(hour: int, minute: int) -> tuple[bool, str]:
+    """指定時刻に毎日実行するタスクを登録する。"""
+    import subprocess
+    ps1 = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "daily_earnings_report.ps1").replace("\\", "\\\\")
+    cmd = (
+        f"$a = New-ScheduledTaskAction -Execute 'powershell.exe' "
+        f"-Argument '-ExecutionPolicy Bypass -WindowStyle Hidden -File \"{ps1}\"'; "
+        f"$t = New-ScheduledTaskTrigger -Daily -At '{hour:02d}:{minute:02d}'; "
+        f"$s = New-ScheduledTaskSettingsSet -StartWhenAvailable; "
+        f"Register-ScheduledTask -TaskName '{_TASK_NAME}' "
+        f"-Action $a -Trigger $t -Settings $s -Force | Out-Null; "
+        f"Write-Output 'OK'"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=15,
+        )
+        if "OK" in r.stdout:
+            return True, "タスクを登録しました"
+        return False, r.stderr.strip() or r.stdout.strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def _task_delete() -> tuple[bool, str]:
+    """タスクを削除する。"""
+    import subprocess
+    cmd = f"Unregister-ScheduledTask -TaskName '{_TASK_NAME}' -Confirm:$false; Write-Output 'OK'"
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=10,
+        )
+        if "OK" in r.stdout or r.returncode == 0:
+            return True, "タスクを削除しました"
+        return False, r.stderr.strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def _task_run_now() -> tuple[bool, str]:
+    """タスクを今すぐ実行する。"""
+    import subprocess
+    cmd = f"Start-ScheduledTask -TaskName '{_TASK_NAME}'; Write-Output 'OK'"
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True, text=True, timeout=10,
+        )
+        return True, "実行を開始しました"
+    except Exception as e:
+        return False, str(e)
+
+
+# ── タブ本体 ─────────────────────────────────────────────────────────────────
 
 def render_earnings_report_tab() -> None:
-    st.title("📰 決算レポート")
+    import datetime as _dt
+    import subprocess
+
+    st.title("📰 決算カレンダー")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ① 日付選択 + 決算一覧取得
+    # ════════════════════════════════════════════════════════════════════════
+    st.markdown("### 📅 決算発表日を選択して取得")
+
+    _today = _dt.date.today()
+
+    # ショートカットボタン
+    _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
+    for _col, _label, _delta in [
+        (_sc1, "今日",       0),
+        (_sc2, "昨日",       1),
+        (_sc3, "2日前",      2),
+        (_sc4, "先週金曜日", (_today.weekday() + 3) % 7 + (7 if _today.weekday() < 4 else 0)),
+        (_sc5, "先週月曜日", _today.weekday() + 7),
+    ]:
+        if _col.button(_label, key=f"er_sc_{_label}", use_container_width=True):
+            st.session_state["er_sel_date"] = _today - _dt.timedelta(days=_delta)
+
+    # 日付ピッカー + 取得ボタン
+    _dp_col, _btn_col, _ref_col = st.columns([0.5, 0.2, 0.3])
+    with _dp_col:
+        er_date = st.date_input(
+            "対象日付",
+            value=st.session_state.get("er_sel_date", _today),
+            max_value=_today,
+            key="er_sel_date",
+            label_visibility="collapsed",
+        )
+    with _btn_col:
+        er_fetch = st.button("📥 取得", type="primary",
+                             use_container_width=True, key="er_fetch_btn")
+    with _ref_col:
+        _saved_dates = _list_saved_dates()
+        st.caption(f"保存済み: {len(_saved_dates)} 日分")
+
+    # 取得 or キャッシュ読み込み
+    er_date_str = str(er_date)
+    if er_fetch:
+        with st.spinner(f"{er_date_str} の決算情報を取得中..."):
+            _fetch_earnings_calendar.clear()          # キャッシュクリアして再取得
+            rows = _fetch_earnings_calendar(er_date_str)
+        if rows:
+            _save_earnings_results(er_date_str, rows)
+            st.session_state["er_rows"]      = rows
+            st.session_state["er_rows_date"] = er_date_str
+            st.success(f"{er_date_str}：{len(rows)} 社の決算情報を取得しました")
+        elif "error" in str(rows):
+            st.error(f"取得エラー: {rows}")
+        else:
+            # APIレート制限の可能性 → 保存済みデータを確認
+            saved = _load_saved_earnings(er_date_str)
+            if saved:
+                st.session_state["er_rows"]      = saved
+                st.session_state["er_rows_date"] = er_date_str
+                st.info(f"APIレート制限のため保存済みデータを表示します（{len(saved)} 社）")
+            else:
+                st.warning(f"{er_date_str} の決算発表はありません（またはAPIレート制限）")
+                st.session_state["er_rows"] = []
+    elif "er_rows_date" not in st.session_state:
+        # 初回表示: 保存済みデータがあれば自動ロード
+        saved = _load_saved_earnings(er_date_str)
+        if saved:
+            st.session_state["er_rows"]      = saved
+            st.session_state["er_rows_date"] = er_date_str
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ② 決算一覧の表示
+    # ════════════════════════════════════════════════════════════════════════
+    er_rows: list[dict] = st.session_state.get("er_rows", [])
+    er_rows_date: str   = st.session_state.get("er_rows_date", "")
+
+    if er_rows:
+        st.divider()
+        _th1, _th2 = st.columns([0.7, 0.3])
+        with _th1:
+            st.markdown(f"#### {er_rows_date} の決算発表　**{len(er_rows)} 社**")
+        with _th2:
+            # 全銘柄を監視銘柄に一括追加
+            if st.button(f"📌 全{len(er_rows)}社を監視銘柄に追加",
+                         key="er_add_all", use_container_width=True):
+                _fund_df = load_funda_data()
+                _added = 0
+                for _r in er_rows:
+                    _sc = str(_r.get("secCode", "")).rstrip("0")
+                    if _sc and len(_sc) == 4:
+                        _tk = f"{_sc}.T"
+                        _existing = _fund_df["code"].tolist() if "code" in _fund_df.columns else []
+                        if _tk not in _existing:
+                            _fund_df = pd.concat(
+                                [_fund_df, pd.DataFrame([{"code": _tk}])],
+                                ignore_index=True,
+                            )
+                            _added += 1
+                save_funda_data(_fund_df)
+                st.success(f"{_added} 社を監視銘柄に追加しました")
+                st.rerun()
+
+        # テキスト検索
+        _search = st.text_input("🔍 絞り込み（企業名 / コード）",
+                                placeholder="例: 7203 またはトヨタ",
+                                key="er_search", label_visibility="collapsed")
+
+        # ヘッダー行
+        _hw = [0.7, 1.8, 1.2, 1.0, 0.9, 0.6]
+        _hcols = st.columns(_hw)
+        for _hc, _hl in zip(_hcols, ["コード", "企業名", "決算種別", "市場", "開示時刻", "監視"]):
+            _hc.markdown(f"**{_hl}**")
+        st.divider()
+
+        # データ行
+        _fund_df_now = load_funda_data()
+        _existing_codes = set(_fund_df_now["code"].tolist()) if "code" in _fund_df_now.columns else set()
+
+        for _r in er_rows:
+            _raw_sc   = str(_r.get("secCode", ""))
+            _sec_code = _raw_sc.rstrip("0") if _raw_sc.endswith("0") else _raw_sc
+            _name     = _r.get("companyName") or _r.get("name") or _r.get("filerName") or "―"
+            _qtype    = _r.get("reportType") or _r.get("quarter") or _r.get("docType") or "―"
+            _market   = _r.get("market") or _r.get("exchange") or "―"
+            _dtime    = _r.get("disclosureTime") or _r.get("time") or "―"
+            _ticker   = f"{_sec_code}.T"
+
+            # 絞り込み
+            if _search and _search not in _sec_code and _search not in _name:
+                continue
+
+            _rc = st.columns(_hw)
+            _rc[0].markdown(f"`{_sec_code}`")
+            _rc[1].write(_name)
+            _rc[2].write(str(_qtype))
+            _rc[3].write(str(_market))
+            _rc[4].write(str(_dtime))
+
+            _already = _ticker in _existing_codes
+            if _already:
+                _rc[5].markdown("✅")
+            else:
+                if _rc[5].button("＋", key=f"er_add_{_sec_code}",
+                                 help="監視銘柄に追加"):
+                    _fund_df_now = pd.concat(
+                        [_fund_df_now, pd.DataFrame([{"code": _ticker}])],
+                        ignore_index=True,
+                    )
+                    save_funda_data(_fund_df_now)
+                    _existing_codes.add(_ticker)
+                    st.rerun()
+
+        # CSV ダウンロード
+        st.divider()
+        _csv_df = pd.DataFrame([{
+            "secCode":    str(_r.get("secCode", "")).rstrip("0"),
+            "企業名":     _r.get("companyName") or _r.get("name") or "",
+            "決算種別":   _r.get("reportType") or _r.get("quarter") or "",
+            "市場":       _r.get("market") or "",
+            "開示時刻":   _r.get("disclosureTime") or "",
+        } for _r in er_rows])
+        st.download_button(
+            "📥 CSVダウンロード",
+            data=_csv_df.to_csv(index=False, encoding="utf-8-sig"),
+            file_name=f"earnings_{er_rows_date}.csv",
+            mime="text/csv",
+            key="er_csv_dl",
+        )
+
+    elif er_fetch:
+        pass   # すでに上でメッセージ表示済み
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ③ 自動取得スケジュール（Windows タスクスケジューラ）
+    # ════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### ⏰ 自動取得スケジュール")
+
+    _status = _task_status()
+    _status_map = {
+        "ready":    ("🟢 登録済み（待機中）", "success"),
+        "running":  ("🔵 実行中",             "info"),
+        "disabled": ("🟡 無効",               "warning"),
+        "none":     ("⚫ 未登録",              ""),
+        "error":    ("🔴 確認エラー",          "error"),
+    }
+    _status_label, _status_type = _status_map.get(_status, (f"❓ {_status}", ""))
+    st.markdown(f"**現在の状態：** {_status_label}")
+
+    _sa1, _sa2, _sa3, _sa4 = st.columns([0.3, 0.2, 0.2, 0.3])
+    with _sa1:
+        _reg_h = st.number_input("実行時刻（時）", min_value=0, max_value=23, value=20,
+                                  key="er_task_hour", label_visibility="visible")
+        _reg_m = st.number_input("実行時刻（分）", min_value=0, max_value=59, value=0,
+                                  step=5, key="er_task_min", label_visibility="visible")
+    with _sa2:
+        st.write("")
+        st.write("")
+        if st.button("📝 登録 / 更新", key="er_task_reg", use_container_width=True,
+                     type="primary"):
+            _ok, _msg = _task_register(int(_reg_h), int(_reg_m))
+            (st.success if _ok else st.error)(f"{_msg}")
+            st.rerun()
+    with _sa3:
+        st.write("")
+        st.write("")
+        if st.button("🗑️ 削除", key="er_task_del", use_container_width=True,
+                     disabled=(_status == "none")):
+            _ok, _msg = _task_delete()
+            (st.success if _ok else st.error)(f"{_msg}")
+            st.rerun()
+    with _sa4:
+        st.write("")
+        st.write("")
+        if st.button("▶️ 今すぐ実行", key="er_task_now", use_container_width=True,
+                     disabled=(_status not in ("ready", "disabled"))):
+            _ok, _msg = _task_run_now()
+            (st.success if _ok else st.error)(f"{_msg}")
+        if st.button("🔄 状態を更新", key="er_task_refresh", use_container_width=True):
+            st.rerun()
+
     st.caption(
-        "毎日の決算発表をまとめた自動生成レポートを表示します。"
-        "　レポートは `daily_earnings_report.bat` を実行すると `reports/` フォルダに保存されます。"
+        f"タスク名: `{_TASK_NAME}`　　"
+        "毎日指定時刻に決算カレンダーを取得して `earnings_results.json` に保存します。"
+        "（スクリプト: `daily_earnings_report.bat`）"
     )
 
-    # ── 自動生成スクリプトの実行案内 ─────────────────────────────────────
-    with st.expander("🚀 レポートの自動生成方法", expanded=False):
-        st.markdown("""
-**手動実行（今すぐ生成）**
-```
-daily_earnings_report.bat
-```
-または PowerShell から：
-```powershell
-powershell -ExecutionPolicy Bypass -File daily_earnings_report.ps1
-```
-特定日付を指定する場合：
-```powershell
-powershell -ExecutionPolicy Bypass -File daily_earnings_report.ps1 -Date 2026-04-10
-```
-
-**タスクスケジューラで毎日自動実行**（毎日20:00に実行する例）：
-```powershell
-$action  = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\Users\\トシヒロ\\Desktop\\turtle_tool\\daily_earnings_report.ps1"
-$trigger = New-ScheduledTaskTrigger -Daily -At "20:00"
-Register-ScheduledTask -TaskName "TurtleTool_DailyEarnings" -Action $action -Trigger $trigger -RunLevel Highest
-```
-        """)
-
+    # ════════════════════════════════════════════════════════════════════════
+    # ④ 保存済みデータ一覧
+    # ════════════════════════════════════════════════════════════════════════
     st.divider()
+    st.markdown("### 📂 保存済みデータ")
 
-    # ── レポート一覧 ─────────────────────────────────────────────────────
-    report_files = _list_reports()
-
-    _rc1, _rc2, _rc3 = st.columns([0.5, 0.25, 0.25])
-    with _rc1:
-        if report_files:
-            sel_report = st.selectbox(
-                "📅 レポートを選択",
-                options=report_files,
-                format_func=lambda f: f.replace(".md", ""),
-                key="er_report_select",
+    _saved_list = _list_saved_dates()
+    if not _saved_list:
+        st.info("まだ保存済みデータはありません。「📥 取得」ボタンで取得してください。")
+    else:
+        _sl_col, _sl_ref = st.columns([0.6, 0.4])
+        with _sl_col:
+            _sel_saved = st.selectbox(
+                "日付を選択",
+                options=_saved_list,
+                key="er_saved_select",
+                label_visibility="collapsed",
             )
-        else:
-            st.info(
-                "`reports/` フォルダにレポートがありません。"
-                "　`daily_earnings_report.bat` を実行して生成してください。"
-            )
-            sel_report = None
-    with _rc2:
-        if st.button("🔄 一覧を更新", key="er_refresh", use_container_width=True):
-            st.rerun()
-    with _rc3:
-        # 今日分を今すぐ生成するショートカット（PowerShell を呼び出す）
-        if st.button("⚡ 今日分を生成", key="er_run_today", use_container_width=True,
-                     help="daily_earnings_report.ps1 を実行して今日分を生成します"):
-            ps1_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                    "daily_earnings_report.ps1")
-            import subprocess, datetime as _dt
-            today = _dt.date.today().strftime("%Y-%m-%d")
-            try:
-                _proc = subprocess.Popen(
-                    ["powershell", "-ExecutionPolicy", "Bypass",
-                     "-File", ps1_path, "-Date", today],
-                    cwd=os.path.dirname(os.path.abspath(__file__)),
-                )
-                st.success(
-                    f"レポート生成を開始しました（PID {_proc.pid}）。"
-                    "完了後に「🔄 一覧を更新」を押してください。"
-                )
-            except Exception as _e:
-                st.error(f"実行エラー: {_e}")
-
-    # ── レポート表示 ─────────────────────────────────────────────────────
-    if sel_report:
-        report_text = _load_report(sel_report)
-        if report_text:
-            # ヘッダー行（ダウンロードボタン）
-            _rh1, _rh2 = st.columns([0.8, 0.2])
-            with _rh1:
-                # レポートの1行目をタイトルとして表示
-                first_line = report_text.split("\n")[0].lstrip("#").strip()
-                st.markdown(f"**{first_line}**")
-            with _rh2:
-                st.download_button(
-                    "📥 MDダウンロード",
-                    data=report_text,
-                    file_name=sel_report,
-                    mime="text/markdown",
-                    key="er_dl_btn",
-                )
-            with st.container(border=True):
-                st.markdown(report_text)
-
-            # ── 対応ログファイルの表示 ────────────────────────────────
-            log_file = sel_report.replace(".md", ".log")
-            log_path = os.path.join(_LOGS_DIR, f"run-{log_file}")
-            if os.path.exists(log_path):
-                with st.expander("📋 実行ログを見る", expanded=False):
-                    try:
-                        with open(log_path, encoding="utf-8", errors="replace") as lf:
-                            st.code(lf.read(), language="text")
-                    except Exception:
-                        st.warning("ログファイルの読み込みに失敗しました。")
-        else:
-            st.warning("レポートファイルの読み込みに失敗しました。")
+        with _sl_ref:
+            if st.button("この日付のデータを表示", key="er_load_saved",
+                         use_container_width=True):
+                _loaded = _load_saved_earnings(_sel_saved)
+                st.session_state["er_rows"]      = _loaded
+                st.session_state["er_rows_date"] = _sel_saved
+                st.rerun()
 
 
 # ===========================================================================
