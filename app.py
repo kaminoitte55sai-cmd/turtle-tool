@@ -185,15 +185,19 @@ def save_state(list_id: int | None = None) -> None:
         for row in records
     ]
     _names = st.session_state.get("list_names", {})
+    # 理論株価キャッシュ
+    _tp = st.session_state.get(f"tp_cache_{list_id}", {})
     data = {
-        "name":         _names.get(list_id, f"リスト{list_id}"),
-        "n_rows":       st.session_state.n_rows,
-        "capital":      st.session_state.capital,
-        "losscut_mult": st.session_state.losscut_mult,
-        "risk_pct":     st.session_state.risk_pct,
-        "prev_tickers": st.session_state.prev_tickers,
-        "fx_rates":     st.session_state.fx_rates,
-        "df_records":   clean,
+        "name":               _names.get(list_id, f"リスト{list_id}"),
+        "n_rows":             st.session_state.n_rows,
+        "capital":            st.session_state.capital,
+        "losscut_mult":       st.session_state.losscut_mult,
+        "risk_pct":           st.session_state.risk_pct,
+        "prev_tickers":       st.session_state.prev_tickers,
+        "fx_rates":           st.session_state.fx_rates,
+        "df_records":         clean,
+        "theoretical_prices": _tp.get("prices", {}),
+        "theoretical_at":     _tp.get("calculated_at", ""),
     }
     with open(_list_save_file(list_id), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
@@ -234,6 +238,14 @@ def _load_list_into_state(list_id: int) -> None:
             _names = st.session_state.setdefault("list_names",
                          {i: f"リスト{i}" for i in range(1, NUM_POS_LISTS + 1)})
             _names[list_id] = _saved_name
+        # 保存された理論株価キャッシュを復元
+        _saved_tp = saved.get("theoretical_prices", {})
+        _saved_tp_at = saved.get("theoretical_at", "")
+        if _saved_tp:
+            st.session_state[f"tp_cache_{list_id}"] = {
+                "prices":        _saved_tp,
+                "calculated_at": _saved_tp_at,
+            }
     else:
         st.session_state.n_rows       = INITIAL_ROWS
         st.session_state.capital      = 1_000_000
@@ -1060,14 +1072,15 @@ def render_position_tab() -> None:
         if st.button("➕ 行追加", use_container_width=True):
             add_row(); save_state(); st.rerun()
     with btn2:
-        _tp_on = st.session_state.get("show_theoretical", False)
+        _tp_sk  = f"show_theoretical_{_active}"   # リスト別キー
+        _tp_on  = st.session_state.get(_tp_sk, False)
         if st.button(
             "💡 理論株価 ▶" if _tp_on else "💡 理論株価",
-            key="btn_theoretical",
+            key=f"btn_theoretical_{_active}",
             type="primary" if _tp_on else "secondary",
             use_container_width=True,
         ):
-            st.session_state["show_theoretical"] = not _tp_on
+            st.session_state[_tp_sk] = not _tp_on
             st.rerun()
 
     st.divider()
@@ -1171,18 +1184,26 @@ def render_position_tab() -> None:
         st.rerun()
 
     # ════════════════════════════════════════════════════════════════════════
-    # ▼ 理論株価パネル（ボタンで開閉）
+    # ▼ 理論株価パネル（リスト別・ボタンで開閉・結果をキャッシュ保存）
     # ════════════════════════════════════════════════════════════════════════
-    if st.session_state.get("show_theoretical", False):
+    _tp_sk = f"show_theoretical_{_active}"
+    if st.session_state.get(_tp_sk, False):
         st.divider()
         st.markdown("### 💡 理論株価")
         st.caption(
             "EdinetDB の財務データから独自ロジックで試算。"
             "理論株価 ＝ 資産価値 ＋ 事業価値 − 市場リスク。"
-            "投資判断の参考値であり、売買推奨ではありません。"
+            "結果はリスト別に保存され、次回起動時も表示されます。"
+            "APIは1日100回制限のため、必要時のみ再計算してください。"
         )
 
-        # 銘柄コードが入力されている行を収集
+        # キャッシュ読み出し
+        _tp_ck         = f"tp_cache_{_active}"
+        _tp_cache      = st.session_state.get(_tp_ck, {})
+        _cached_prices = _tp_cache.get("prices", {})
+        _calculated_at = _tp_cache.get("calculated_at", "")
+
+        # ── 銘柄コードが入力されている行を収集 ──────────────────────────
         _tp_rows = []
         for _i in range(n_rows):
             _code_raw = st.session_state.df.at[_i, "銘柄コード"]
@@ -1196,107 +1217,120 @@ def render_position_tab() -> None:
         if not _tp_rows:
             st.info("銘柄コードが入力された行がありません。")
         else:
-            _results = []
-            _progress = st.progress(0, text="理論株価を計算中...")
-            for _idx, (_sc, _name, _price) in enumerate(_tp_rows):
-                _progress.progress(
-                    (_idx + 1) / len(_tp_rows),
-                    text=f"計算中… {_name}（{_sc}）",
+            # ── 計算ボタンエリア ──────────────────────────────────────────
+            _bc1, _bc2, _bi = st.columns([0.18, 0.18, 0.64])
+            _has_cache = bool(_cached_prices)
+            with _bc1:
+                _do_calc = st.button(
+                    "▶ 計算する", key=f"tp_calc_{_active}",
+                    use_container_width=True,
+                    disabled=_has_cache,
                 )
-                if _price is None:
-                    _results.append({
-                        "銘柄コード": _sc, "銘柄名": _name,
-                        "現在値(円)": "―",
-                        "理論株価(円)": "データなし（現在値なし）",
-                        "乖離率(%)": "―",
-                        "資産価値": "―", "事業価値": "―",
-                        "市場リスク補正": "―",
-                        "BPS": "―", "PBR": "―",
-                        "自己資本比率": "―", "ROA": "―",
-                        "財務レバレッジ": "―", "使用EPS": "―",
-                    })
-                    continue
-                _res = _calc_theoretical_price(_sc, _price)
-                if "error" in _res:
-                    _results.append({
-                        "銘柄コード": _sc, "銘柄名": _name,
-                        "現在値(円)": f"{_price:,.0f}",
-                        "理論株価(円)": f"エラー: {_res['error']}",
-                        "乖離率(%)": "―",
-                        "資産価値": "―", "事業価値": "―",
-                        "市場リスク補正": "―",
-                        "BPS": "―", "PBR": "―",
-                        "自己資本比率": "―", "ROA": "―",
-                        "財務レバレッジ": "―", "使用EPS": "―",
-                    })
-                    continue
-                _div = _res["divergence_pct"]
-                _eps_label = f"{_res['use_eps']:.1f}({'予' if _res['is_forecast_eps'] else '実'})"
-                _results.append({
-                    "銘柄コード":     _sc,
-                    "銘柄名":         _name,
-                    "現在値(円)":     f"{_price:,.0f}",
-                    "理論株価(円)":   f"{_res['theoretical_price']:,.0f}",
-                    "乖離率(%)":      f"{_div:+.1f}" if _div is not None else "―",
-                    "資産価値":       f"{_res['asset_value']:,.0f}",
-                    "事業価値":       f"{_res['business_value']:,.0f}",
-                    "市場リスク補正": f"−{_res['risk_rate']*100:.0f}%",
-                    "BPS":            f"{_res['bps']:,.0f}",
-                    "PBR":            f"{_res['pbr']:.2f}",
-                    "自己資本比率":   f"{_res['equity_ratio_pct']:.1f}%",
-                    "ROA":            f"{_res['roa_pct']:.1f}%",
-                    "財務レバレッジ": f"{_res['leverage']:.2f}x (×{_res['lev_corr']:.2f}補正)",
-                    "使用EPS":        _eps_label,
-                })
-            _progress.empty()
-
-            # ── カード表示 ─────────────────────────────────────────────────
-            for _r in _results:
-                _div_str = _r["乖離率(%)"]
-                try:
-                    _div_f = float(_div_str.replace("+", ""))
-                    _div_color = "#16a34a" if _div_f >= 0 else "#dc2626"
-                    _div_label = "割安" if _div_f >= 0 else "割高"
-                    _div_sign  = f"{'↑' if _div_f >= 0 else '↓'} {_div_str}%（{_div_label}）"
-                except Exception:
-                    _div_color = "#888"
-                    _div_sign  = _div_str
-
-                _theory_val = _r["理論株価(円)"]
-                _is_ok = "エラー" not in str(_theory_val) and "なし" not in str(_theory_val)
-
-                with st.container(border=True):
-                    _hc1, _hc2, _hc3 = st.columns([0.35, 0.30, 0.35])
-                    _hc1.markdown(
-                        f"**{_r['銘柄名']}**  "
-                        f"<span style='color:#555;font-size:0.85em'>({_r['銘柄コード']})</span>",
-                        unsafe_allow_html=True,
+            with _bc2:
+                _do_recalc = st.button(
+                    "🔄 再計算", key=f"tp_recalc_{_active}",
+                    use_container_width=True,
+                    disabled=not _has_cache,
+                )
+            with _bi:
+                if _calculated_at:
+                    st.caption(
+                        f"📅 最終計算: **{_calculated_at}**　"
+                        f"（{len(_cached_prices)} 銘柄 / APIコール節約のため手動更新制）"
                     )
-                    if _is_ok:
+                else:
+                    st.caption("まだ計算されていません。「▶ 計算する」を押してください。")
+
+            # ── 実際の計算（クリック時のみ EdinetDB を叩く）─────────────
+            if _do_calc or _do_recalc:
+                _new_prices = {}
+                _prog = st.progress(0, text="理論株価を計算中...")
+                for _idx, (_sc, _name, _price) in enumerate(_tp_rows):
+                    _prog.progress(
+                        (_idx + 1) / len(_tp_rows),
+                        text=f"計算中… {_name}（{_sc}）",
+                    )
+                    if _price is None:
+                        _new_prices[_sc] = {"error": "現在値なし", "_name": _name, "_price": None}
+                    else:
+                        _r2 = _calc_theoretical_price(_sc, _price)
+                        _r2["_name"]  = _name
+                        _r2["_price"] = _price
+                        _new_prices[_sc] = _r2
+                _prog.empty()
+                _now_str = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
+                st.session_state[_tp_ck] = {"prices": _new_prices, "calculated_at": _now_str}
+                save_state(_active)   # ← JSONに永続保存
+                st.rerun()
+
+            # ── キャッシュからカード表示 ──────────────────────────────────
+            if _cached_prices:
+                for _sc, _name, _price in _tp_rows:
+                    _res = _cached_prices.get(_sc)
+                    if _res is None:
+                        st.warning(f"{_name}（{_sc}）: キャッシュなし → 再計算してください")
+                        continue
+
+                    # エラー系
+                    if "error" in _res:
+                        with st.container(border=True):
+                            st.markdown(
+                                f"**{_name}**  "
+                                f"<span style='color:#555;font-size:0.85em'>({_sc})</span>",
+                                unsafe_allow_html=True,
+                            )
+                            st.warning(f"⚠️ {_res['error']}")
+                        continue
+
+                    # 正常系
+                    _div      = _res.get("divergence_pct")
+                    _theory   = _res.get("theoretical_price")
+                    _cur      = _res.get("_price") or _price or 0
+                    _eps_lbl  = (
+                        f"{_res['use_eps']:.1f}({'予' if _res.get('is_forecast_eps') else '実'})"
+                        if _res.get("use_eps") else "―"
+                    )
+                    try:
+                        _div_f     = float(_div) if _div is not None else None
+                        _div_color = "#16a34a" if (_div_f is not None and _div_f >= 0) else "#dc2626"
+                        _div_label = "割安↑" if (_div_f is not None and _div_f >= 0) else "割高↓"
+                        _div_txt   = f"{_div_f:+.1f}%（{_div_label}）" if _div_f is not None else "―"
+                    except Exception:
+                        _div_color, _div_txt = "#888", "―"
+
+                    with st.container(border=True):
+                        _hc1, _hc2, _hc3 = st.columns([0.35, 0.28, 0.37])
+                        _hc1.markdown(
+                            f"**{_name}**  "
+                            f"<span style='color:#555;font-size:0.85em'>({_sc})</span>",
+                            unsafe_allow_html=True,
+                        )
                         _hc2.markdown(
-                            f"<div style='font-size:1.3em;font-weight:700;'>¥{_theory_val}</div>",
+                            f"<div style='font-size:1.3em;font-weight:700;'>"
+                            f"¥{_theory:,.0f}</div>",
                             unsafe_allow_html=True,
                         )
                         _hc3.markdown(
-                            f"<span style='color:{_div_color};font-size:1.1em;font-weight:600;'>"
-                            f"{_div_sign}</span>　"
-                            f"<span style='color:#555;font-size:0.82em'>現在値 ¥{_r['現在値(円)']}</span>",
+                            f"<span style='color:{_div_color};font-size:1.05em;font-weight:600;'>"
+                            f"{_div_txt}</span>　"
+                            f"<span style='color:#666;font-size:0.82em'>現在値 ¥{_cur:,.0f}</span>",
                             unsafe_allow_html=True,
                         )
-                    else:
-                        _hc2.warning(_theory_val)
-
-                    if _is_ok:
                         _dc1, _dc2, _dc3, _dc4, _dc5 = st.columns(5)
-                        _dc1.metric("資産価値",    f"¥{_r['資産価値']}")
-                        _dc2.metric("事業価値",    f"¥{_r['事業価値']}")
-                        _dc3.metric("市場リスク補正", _r["市場リスク補正"])
-                        _dc4.metric("BPS / PBR",  f"¥{_r['BPS']} / {_r['PBR']}x")
-                        _dc5.metric("自己資本比率", _r["自己資本比率"])
+                        _dc1.metric("資産価値",      f"¥{_res.get('asset_value',0):,.0f}")
+                        _dc2.metric("事業価値",      f"¥{_res.get('business_value',0):,.0f}")
+                        _dc3.metric("市場リスク補正", f"−{_res.get('risk_rate',0)*100:.0f}%")
+                        _dc4.metric("BPS / PBR",
+                                    f"¥{_res.get('bps',0):,.0f} / {_res.get('pbr',0):.2f}x")
+                        _dc5.metric("自己資本比率",   f"{_res.get('equity_ratio_pct',0):.1f}%")
                         st.caption(
-                            f"ROA: {_r['ROA']}　財務レバレッジ: {_r['財務レバレッジ']}　"
-                            f"使用EPS: ¥{_r['使用EPS']}"
+                            f"ROA: {_res.get('roa_pct',0):.1f}%　"
+                            f"財務レバレッジ: {_res.get('leverage',0):.2f}x "
+                            f"(×{_res.get('lev_corr',1):.2f}補正)　"
+                            f"使用EPS: ¥{_eps_lbl}"
                         )
+            elif not (_do_calc or _do_recalc):
+                st.info("「▶ 計算する」を押すと EdinetDB から財務データを取得して理論株価を算出します。")
 
 
 def render_screener_tab() -> None:
@@ -2039,6 +2073,11 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
     ▸ 事業価値  = 予想EPS × 15 × ROA(上限30%)×10 × 財務レバレッジ補正
     ▸ 市場リスク = (資産価値+事業価値) × リーマンショックルール補正率
                    (PBR ≥ 0.5 なら補正なし)
+
+    PBR フォールバック:
+      EdinetDB が priceToBook/pbr を返さない場合、
+      BPS = EPS ÷ ROE（ROEの定義: ROE = EPS/BPS）から導出し、
+      PBR = 現在株価 ÷ BPS として算出する。
     """
     edb = edinet_get_company(sec_code)
     if "error" in edb:
@@ -2053,10 +2092,24 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
     le           = edb.get("latestEarnings") or {}
     forecast_eps = le.get("forecastEps")             # 予想EPS（円）
 
-    # バリデーション
+    # ── BPS / PBR の導出（API から取れない場合のフォールバック）────────────
+    # ROEの定義: ROE = EPS / BPS  →  BPS = EPS / ROE
+    bps = None
+    bps_source = "price/PBR"
+    if pbr and pbr > 0 and current_price > 0:
+        bps = current_price / pbr
+    elif eps and roe and roe > 0:
+        # BPS = 実績EPS ÷ ROE で近似
+        bps = eps / roe
+        pbr = current_price / bps if (bps and bps > 0) else None
+        bps_source = "EPS/ROE（推定）"
+
+    # ── バリデーション ─────────────────────────────────────────────────────
     missing = []
     if equity_ratio is None or equity_ratio <= 0:
-        missing.append("自己資本比率")
+        missing.append("自己資本比率(equityRatio)")
+    if bps is None or bps <= 0:
+        missing.append("BPS/PBR（priceToBook・pbr・roeのいずれも取得不可）")
     if pbr is None or pbr <= 0:
         missing.append("PBR")
     if not (forecast_eps or eps):
@@ -2067,9 +2120,6 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
     # ── 使用EPS (予想優先、なければ実績) ──────────────────────────────────
     use_eps = forecast_eps if forecast_eps else eps
     is_forecast = forecast_eps is not None
-
-    # ── BPS = 現在株価 ÷ PBR ───────────────────────────────────────────────
-    bps = current_price / pbr
 
     # ────────────────────────────────────────────────────────────────────────
     # 1. 資産価値 = BPS × 割引評価率
