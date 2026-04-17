@@ -2808,17 +2808,19 @@ def render_funda_tab() -> None:
     # ════════════════════════════════════════════════════════════════════════
     st.markdown("### ✍️ 手動追加")
 
-    _m_col1, _m_col2 = st.columns([0.4, 0.6])
-    with _m_col1:
-        manual_code = st.text_input(
-            "銘柄コード（例: 7203.T）",
-            key="funda_manual_input",
-            placeholder="7203.T",
-        )
-    with _m_col2:
-        st.write("")
-        st.write("")
-        if st.button("➕ 追加", key="funda_manual_add_btn"):
+    with st.form("funda_manual_form", clear_on_submit=True):
+        _m_col1, _m_col2 = st.columns([0.6, 0.4])
+        with _m_col1:
+            manual_code = st.text_input(
+                "銘柄コード（例: 7203.T）",
+                key="funda_manual_input",
+                placeholder="7203.T",
+            )
+        with _m_col2:
+            st.write("")
+            st.write("")
+            _manual_submitted = st.form_submit_button("➕ 追加", use_container_width=True)
+        if _manual_submitted:
             _code = normalize_ticker(manual_code.strip())
             if _code:
                 with st.spinner(f"{_code} のデータを取得中..."):
@@ -2840,7 +2842,7 @@ def render_funda_tab() -> None:
     # ════════════════════════════════════════════════════════════════════════
     # ③ ファンダ一覧表示
     # ════════════════════════════════════════════════════════════════════════
-    st.markdown("### 📋 ファンダ一覧")
+    st.markdown("### 📋 銘柄リスト")
 
     fund_df = st.session_state.fund_df
 
@@ -2872,8 +2874,8 @@ def render_funda_tab() -> None:
 
     # ── テーブルヘッダー ─────────────────────────────────────────────────
     _FUNDA_LABELS = ["コード", "銘柄名", "現在価格", "前日比(%)",
-                     "かぶたん", "理論株価", "チャート", "G", "📊EDB", "メモ", "削除"]
-    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.5, 0.6, 0.6, 0.6]
+                     "かぶたん", "理論株価", "チャート", "G", "X", "Yahoo", "メモ", "削除"]
+    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.5, 0.5, 0.6, 0.6, 0.6]
     _hdr_cs = st.columns(_FUNDA_WIDTHS)
     for _hc, _lbl in zip(_hdr_cs, _FUNDA_LABELS):
         _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
@@ -2920,20 +2922,24 @@ def render_funda_tab() -> None:
         with _rc[7]:
             st.link_button("G", f"https://www.google.com/finance/quote/{_ticker_clean}:TYO?hl=ja")
 
-        # EdinetDB 分析ボタン
+        # X（旧Twitter）検索
         with _rc[8]:
-            _edb_key = f"edb_open_{_code_raw}"
-            if st.button("📊", key=f"edb_btn_{_code_raw}"):
-                st.session_state[_edb_key] = not st.session_state.get(_edb_key, False)
+            import urllib.parse as _up
+            _x_name = _up.quote(_jp_name) if _jp_name != "—" else _up.quote(_ticker_clean)
+            st.link_button("𝕏", f"https://x.com/search?q={_x_name}&src=typed_query&f=top")
+
+        # Yahoo ファイナンス
+        with _rc[9]:
+            st.link_button("Yahoo", f"https://finance.yahoo.co.jp/quote/{_ticker_clean}")
 
         # メモ開閉ボタン
-        with _rc[9]:
+        with _rc[10]:
             _memo_key = f"memo_open_{_code_raw}"
             if st.button("📝", key=f"memo_btn_{_code_raw}"):
                 st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
 
         # 削除ボタン
-        with _rc[10]:
+        with _rc[11]:
             if st.button("🗑️", key=f"del_funda_{_code_raw}"):
                 st.session_state.fund_df = st.session_state.fund_df[
                     st.session_state.fund_df["code"] != _code_raw
@@ -2945,111 +2951,6 @@ def render_funda_tab() -> None:
                     del st.session_state.funda_memos[_code_raw]
                     save_memo_data(st.session_state.funda_memos)
                 st.rerun()
-
-        # ── EdinetDB 詳細パネル ──────────────────────────────────────────────
-        if st.session_state.get(f"edb_open_{_code_raw}", False):
-            with st.container(border=True):
-                st.markdown(f"#### 📊 EdinetDB分析　{_jp_name}（{_ticker_clean}）")
-                with st.spinner("EdinetDBからデータ取得中..."):
-                    _edb = edinet_get_company(_ticker_clean)
-                    _edb_sh = edinet_get_shareholders(_ticker_clean)
-
-                if "error" in _edb:
-                    st.warning(f"データ取得エラー: {_edb['error']}")
-                else:
-                    # ── 財務健全性スコア ──
-                    _score = _edb.get("healthScore")
-                    st.markdown("**財務健全性スコア**")
-                    st.markdown(_health_badge(_score), unsafe_allow_html=True)
-                    st.markdown("")
-
-                    # ── 最新財務ハイライト ──
-                    _fy    = _edb.get("latestFiscalYear", "—")
-                    _rev   = _edb.get("revenue")
-                    _oi    = _edb.get("operatingIncome")
-                    _ni    = _edb.get("netIncome")
-                    _roe   = _edb.get("roe")
-                    _opm   = _edb.get("operatingMargin")
-                    _per   = _edb.get("per")
-                    _pbr_v = _edb.get("priceToBook") or _edb.get("pbr")
-                    _dy    = _edb.get("dividendYield")
-                    _eq    = _edb.get("equityRatio")
-                    _eps   = _edb.get("eps")
-
-                    st.markdown(f"**最新財務ハイライト（FY{_fy}）**")
-                    _fc1, _fc2, _fc3 = st.columns(3)
-                    _fc1.metric("売上高",   _fmt_oku(_rev))
-                    _fc2.metric("営業利益", _fmt_oku(_oi))
-                    _fc3.metric("純利益",   _fmt_oku(_ni))
-
-                    _fr1, _fr2, _fr3, _fr4, _fr5 = st.columns(5)
-                    _fr1.metric("ROE",      f"{_roe*100:.1f}%" if _roe else "—")
-                    _fr2.metric("営業利益率", f"{_opm*100:.1f}%" if _opm else "—")
-                    _fr3.metric("PER",      f"{_per:.1f}倍"   if _per else "—")
-                    _fr4.metric("自己資本比率", f"{_eq*100:.1f}%" if _eq else "—")
-                    _fr5.metric("配当利回り", f"{_dy*100:.2f}%" if _dy else "—")
-
-                    # ── 直近決算（TDNet） ──
-                    _le = _edb.get("latestEarnings")
-                    if _le:
-                        st.markdown("---")
-                        _qtitle = _le.get("title", "直近決算")
-                        _qdate  = _le.get("disclosureDate", "")
-                        st.markdown(f"**直近決算** ({_qdate})　{_qtitle}")
-                        _qc1, _qc2, _qc3, _qc4 = st.columns(4)
-                        _qrev = _le.get("revenue")
-                        _qoi  = _le.get("operatingIncome")
-                        _qni  = _le.get("netIncome")
-                        _qeps = _le.get("eps")
-                        _rc_chg = _le.get("revenueChange")
-                        _oi_chg = _le.get("operatingIncomeChange")
-                        _ni_chg = _le.get("netIncomeChange")
-
-                        def _chg(v):
-                            if v is None: return ""
-                            return f"{v:+.1f}%"
-
-                        _qc1.metric("売上高(百万円)",   f"{_qrev:,.0f}" if _qrev else "—", _chg(_rc_chg))
-                        _qc2.metric("営業利益(百万円)", f"{_qoi:,.0f}"  if _qoi  else "—", _chg(_oi_chg))
-                        _qc3.metric("純利益(百万円)",   f"{_qni:,.0f}"  if _qni  else "—", _chg(_ni_chg))
-                        _qc4.metric("EPS(円)",         f"{_qeps:.2f}"  if _qeps else "—")
-
-                        # 通期予想進捗
-                        _frev = _le.get("forecastRevenue")
-                        _foi  = _le.get("forecastOperatingIncome")
-                        if _frev and _qrev:
-                            _prog = _qrev / _frev * 100
-                            st.progress(min(int(_prog), 100),
-                                        text=f"通期予想進捗 売上: {_prog:.1f}%")
-
-                        # PDFリンク
-                        _pdf = _le.get("pdfUrl")
-                        if _pdf:
-                            st.markdown(f"[📄 決算短信PDF]({_pdf})", unsafe_allow_html=False)
-
-                # ── 大株主 ──
-                if "error" not in _edb_sh:
-                    _filings = _edb_sh.get("filings", [])
-                    if _filings:
-                        st.markdown("---")
-                        st.markdown("**大量保有報告（直近）**")
-                        _sh_rows = []
-                        for _fi in _filings[:5]:
-                            _sh_rows.append({
-                                "提出日":     _fi.get("submit_date", ""),
-                                "株主名":     _fi.get("filer_name", ""),
-                                "保有比率":   f"{_fi.get('total_holding_ratio', 0)*100:.2f}%",
-                                "書類種別":   _fi.get("doc_type", ""),
-                            })
-                        st.dataframe(pd.DataFrame(_sh_rows), use_container_width=True, hide_index=True)
-
-                # EDINET リンク
-                _edinet_code = edinet_get_edinet_code(_ticker_clean)
-                if _edinet_code:
-                    st.markdown(
-                        f"[🔗 EDINET有報ページ](https://edinetdb.jp/company/{_edinet_code})",
-                        unsafe_allow_html=False,
-                    )
 
         # ── メモ展開エリア ──────────────────────────────────────────────────
         if st.session_state.get(f"memo_open_{_code_raw}", False):
