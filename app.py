@@ -3229,18 +3229,6 @@ def render_funda_tab() -> None:
         if _stored_score not in _SCORE_OPTIONS:
             _stored_score = ""
         with _rc[10]:
-            if _stored_score:
-                try:
-                    _score_val = int(_stored_score)
-                    _s_clr = "#dc2626" if _score_val >= 5 else "#374151"
-                except ValueError:
-                    _s_clr = "#374151"
-                st.markdown(
-                    f"<div style='text-align:center;font-weight:800;font-size:1.05em;"
-                    f"color:{_s_clr};line-height:1;margin-bottom:-10px;'>"
-                    f"{_stored_score}</div>",
-                    unsafe_allow_html=True,
-                )
             _new_score = st.selectbox(
                 "スコア",
                 options=_SCORE_OPTIONS,
