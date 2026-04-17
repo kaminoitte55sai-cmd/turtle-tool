@@ -3199,10 +3199,18 @@ def render_funda_tab() -> None:
             st.link_button("かぶたん", f"https://kabutan.jp/stock/news?code={_ticker_clean}",
                            use_container_width=True)
 
-        # ── メモ開閉ボタン ─────────────────────────────────────────────
+        # ── メモ開閉ボタン（メモあり=青塗り、なし=通常）─────────────────
         with _rc[9]:
-            _memo_key = f"memo_open_{_code_raw}"
-            if st.button("📝", key=f"memo_btn_{_code_raw}", use_container_width=True):
+            _memo_key  = f"memo_open_{_code_raw}"
+            _has_memo  = bool(st.session_state.funda_memos.get(_code_raw, "").strip())
+            _memo_label = "📝✓" if _has_memo else "📝"
+            if st.button(
+                _memo_label,
+                key=f"memo_btn_{_code_raw}",
+                use_container_width=True,
+                type="primary" if _has_memo else "secondary",
+                help="メモあり（クリックで開く）" if _has_memo else "メモなし（クリックで追加）",
+            ):
                 st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
 
         # ── スコア（-10 〜 +10）────────────────────────────────────────
