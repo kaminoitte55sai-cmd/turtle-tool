@@ -1232,7 +1232,7 @@ def render_position_tab() -> None:
 
                 st.session_state.prev_tickers[i] = new_ticker
                 save_state()
-                needs_rerun = True
+                st.rerun()
             elif new_ticker:
                 if recalc_row(i, capital, risk_pct, losscut_mult):
                     needs_rerun = True
