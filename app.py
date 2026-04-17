@@ -3023,7 +3023,7 @@ def _add_ticker_to_pos_list(ticker: str, target_list_id: int) -> str:
 
 def render_funda_tab() -> None:
     st.title("👀 監視銘柄")
-    st.caption("銘柄を追加すると現在価格・前日比を自動取得します。データは CSV に自動保存されます。")
+    st.caption("銘柄を追加・管理できます。評価（×/△/〇/◎）と NotebookLM 登録状況をリストで管理できます。データは CSV に自動保存されます。")
 
     # ════════════════════════════════════════════════════════════════════════
     # ① スクリーニング結果から追加
@@ -3113,19 +3113,13 @@ def render_funda_tab() -> None:
         st.info("まだ銘柄が登録されていません。上のセクションから追加してください。")
         return
 
-    # 表示用に列名を日本語化
-    _COL_RENAME = {
-        "code":           "コード",
-        "current_price":  "現在価格",
-        "day_change_pct": "前日比(%)",
-        "error":          "エラー",
-    }
-    disp_df = fund_df.rename(columns={k: v for k, v in _COL_RENAME.items() if k in fund_df.columns}).copy()
-
-    # 数値列を numeric に変換
-    for _col in ["現在価格", "前日比(%)"]:
-        if _col in disp_df.columns:
-            disp_df[_col] = pd.to_numeric(disp_df[_col], errors="coerce")
+    # ── fund_df に新列がなければデフォルト追加 ──────────────────────────────
+    if "rating" not in fund_df.columns:
+        fund_df["rating"] = ""
+        st.session_state.fund_df = fund_df
+    if "notebooklm" not in fund_df.columns:
+        fund_df["notebooklm"] = "False"
+        st.session_state.fund_df = fund_df
 
     # マスタから銘柄名マップを作成（日本語名）
     _funda_name_map = {}
@@ -3135,39 +3129,53 @@ def render_funda_tab() -> None:
             st.session_state.master["name"]
         ))
 
+    _RATING_OPTIONS = ["", "×", "△", "〇", "◎"]
+
     # ── テーブルヘッダー ─────────────────────────────────────────────────
-    _FUNDA_LABELS = ["コード", "銘柄名", "現在価格", "前日比(%)",
+    _FUNDA_LABELS = ["コード", "銘柄名", "評価", "NLM",
                      "かぶたん", "理論株価", "チャート", "G", "X", "Yahoo", "YT", "📌", "メモ", "削除"]
-    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.5, 0.5, 0.6, 0.5, 0.5, 0.6, 0.5]
+    _FUNDA_WIDTHS = [0.8, 1.7, 0.65, 0.45, 0.8, 0.8, 0.6, 0.5, 0.5, 0.6, 0.5, 0.5, 0.6, 0.5]
     _hdr_cs = st.columns(_FUNDA_WIDTHS)
     for _hc, _lbl in zip(_hdr_cs, _FUNDA_LABELS):
         _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
 
-    for _, _row in disp_df.iterrows():
+    _any_funda_changed = False
+    for _idx, _row in fund_df.iterrows():
         _rc = st.columns(_FUNDA_WIDTHS)
 
         # コード・銘柄名
-        _code_raw     = str(_row.get("コード", ""))
+        _code_raw     = str(_row.get("code", ""))
         _ticker_clean = _code_raw.replace(".T", "").replace(".t", "")
         _jp_name      = _funda_name_map.get(_ticker_clean) or _funda_name_map.get(_code_raw) or "—"
         _rc[0].write(_code_raw)
         _rc[1].write(_jp_name)
 
-        # 現在価格
-        _v = _row.get("現在価格")
-        _rc[2].write(f"{float(_v):,.2f}" if pd.notna(_v) else "—")
+        # 評価プルダウン（×/△/〇/◎）
+        _stored_rating = str(_row.get("rating", ""))
+        if _stored_rating not in _RATING_OPTIONS:
+            _stored_rating = ""
+        _new_rating = _rc[2].selectbox(
+            "評価",
+            options=_RATING_OPTIONS,
+            index=_RATING_OPTIONS.index(_stored_rating),
+            key=f"rating_{_code_raw}",
+            label_visibility="collapsed",
+        )
+        if _new_rating != _stored_rating:
+            fund_df.at[_idx, "rating"] = _new_rating
+            _any_funda_changed = True
 
-        # 前日比(%)（正負カラー）
-        _v = _row.get("前日比(%)")
-        if pd.notna(_v):
-            _fv = float(_v)
-            _clr = "#4caf50" if _fv >= 0 else "#f44336"
-            _rc[3].markdown(
-                f'<span style="color:{_clr};font-weight:bold">{_fv:+.2f}%</span>',
-                unsafe_allow_html=True,
-            )
-        else:
-            _rc[3].write("—")
+        # NotebookLM チェックボックス
+        _stored_nlm = str(_row.get("notebooklm", "False")).lower() == "true"
+        _new_nlm = _rc[3].checkbox(
+            "NLM",
+            value=_stored_nlm,
+            key=f"nlm_{_code_raw}",
+            label_visibility="collapsed",
+        )
+        if _new_nlm != _stored_nlm:
+            fund_df.at[_idx, "notebooklm"] = str(_new_nlm)
+            _any_funda_changed = True
 
         # かぶたん
         with _rc[4]:
@@ -3261,6 +3269,12 @@ def render_funda_tab() -> None:
                 st.session_state.funda_memos[_code_raw] = _new_memo
                 save_memo_data(st.session_state.funda_memos)
                 st.success("✅ メモを保存しました")
+
+    # 評価・NLM の変更を自動保存
+    if _any_funda_changed:
+        st.session_state.fund_df = fund_df
+        save_funda_data(fund_df)
+        st.rerun()
 
     # ダウンロード + 削除操作
     dl_col, ref_col, clr_col = st.columns([0.25, 0.25, 0.5])
