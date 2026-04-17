@@ -2253,20 +2253,41 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
     if not isinstance(fin,  dict): fin  = {}
     if not isinstance(earn, dict): earn = {}
 
-    # ── 1株純資産（BPS）──────────────────────────────────────────────────
-    bps     = fin.get("bps")
-    bps_src = "get_financials.bps"
-    if not bps or bps <= 0:
-        pbr_v = fin.get("pbr") or edb.get("priceToBook") or edb.get("pbr")
-        if pbr_v and pbr_v > 0 and current_price > 0:
-            bps     = current_price / pbr_v
-            bps_src = "現在株価÷PBR（推定）"
+    # ── 1株純資産（BPS）= 純資産 ÷ 発行済株式数 ─────────────────────────
+    # 純資産: fin（円）優先、なければ earn（百万円→円換算）
+    # 発行済株式数: earn.sharesOutstanding 優先、なければ fin.sharesIssued
+    _net_assets = fin.get("netAssets")                         # 円
+    if not _net_assets or _net_assets <= 0:
+        _na_earn = earn.get("netAssets") or earn.get("ownersEquity")
+        if _na_earn and _na_earn > 0:
+            _net_assets = _na_earn * 1_000_000                 # 百万円→円
+    _shares_bps = earn.get("sharesOutstanding") or fin.get("sharesIssued")
+
+    bps     = None
+    bps_src = ""
+    if _net_assets and _net_assets > 0 and _shares_bps and _shares_bps > 0:
+        bps     = _net_assets / _shares_bps
+        bps_src = (
+            f"純資産({_net_assets/1e8:.1f}億円)"
+            f"÷発行済株式数({_shares_bps:,}株)"
+        )
+    else:
+        # フォールバック: APIの既算BPS → 現在株価÷PBR → EPS÷ROE
+        _bps_api = fin.get("bps")
+        if _bps_api and _bps_api > 0:
+            bps     = _bps_api
+            bps_src = "get_financials.bps（直接取得）"
         else:
-            eps_v = edb.get("eps")
-            roe_v = fin.get("roeOfficial") or edb.get("roe")
-            if eps_v and roe_v and roe_v > 0:
-                bps     = eps_v / roe_v
-                bps_src = "EPS÷ROE（推定）"
+            pbr_v = fin.get("pbr") or edb.get("priceToBook") or edb.get("pbr")
+            if pbr_v and pbr_v > 0 and current_price > 0:
+                bps     = current_price / pbr_v
+                bps_src = "現在株価÷PBR（推定）"
+            else:
+                eps_v = edb.get("eps")
+                roe_v = fin.get("roeOfficial") or edb.get("roe")
+                if eps_v and roe_v and roe_v > 0:
+                    bps     = eps_v / roe_v
+                    bps_src = "EPS÷ROE（推定）"
 
     # ── 自己資本比率（小数）───────────────────────────────────────────────
     equity_ratio = fin.get("equityRatioOfficial")
