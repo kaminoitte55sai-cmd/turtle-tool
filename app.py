@@ -3093,7 +3093,7 @@ def render_funda_tab() -> None:
                 f"📝 {_jp_name}（{_code_raw}）のメモ",
                 value=_current_memo,
                 key=f"memo_text_{_code_raw}",
-                height=80,
+                height=280,
                 label_visibility="visible",
             )
             if st.button("💾 保存", key=f"memo_save_{_code_raw}"):
