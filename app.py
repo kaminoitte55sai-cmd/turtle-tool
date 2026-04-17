@@ -2631,7 +2631,7 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
         "lev_corr":          round(lev_corr, 3),
         "per_eps":           round(per_eps, 2),
         "per_eps_src":       per_eps_src,
-        "forecast_oi_m":     forecast_oi,   # 百万円（Noneの場合あり）
+        "forecast_oi_m":     jq.get("_fo_oi_m"),   # 百万円（Noneの場合あり）
         "shares":            shares,
         # 市場リスクの根拠
         "pbr":               pbr,
