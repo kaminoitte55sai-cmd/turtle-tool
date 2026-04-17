@@ -218,6 +218,7 @@ def save_state(list_id: int | None = None) -> None:
         "df_records":         clean,
         "theoretical_prices": _tp.get("prices", {}),
         "theoretical_at":     _tp.get("calculated_at", ""),
+        "col_order":          st.session_state.get(f"col_order_{list_id}", []),
     }
     with open(_list_save_file(list_id), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
@@ -266,6 +267,10 @@ def _load_list_into_state(list_id: int) -> None:
             _names = st.session_state.setdefault("list_names",
                          {i: f"リスト{i}" for i in range(1, NUM_POS_LISTS + 1)})
             _names[list_id] = _saved_name
+        # 保存された列順を復元
+        _saved_col_order = saved.get("col_order", [])
+        if _saved_col_order:
+            st.session_state[f"col_order_{list_id}"] = _saved_col_order
         # 保存された理論株価キャッシュを復元
         _saved_tp = saved.get("theoretical_prices", {})
         _saved_tp_at = saved.get("theoretical_at", "")
@@ -1113,8 +1118,8 @@ def render_position_tab() -> None:
                 needs_rerun = True
         save_state()   # パラメータ変更で自動保存
 
-    btn1, _ = st.columns([0.12, 0.88])
-    with btn1:
+    _btn_r1, _btn_r2 = st.columns([0.12, 0.88])
+    with _btn_r1:
         if st.button("➕ 行追加", use_container_width=True):
             add_row(); save_state(); st.rerun()
 
@@ -1127,12 +1132,52 @@ def render_position_tab() -> None:
             st.session_state["pos_fetch_errors"] = {}
             st.rerun()
 
+    # ── 列順設定パネル ────────────────────────────────────────────────────
+    _all_df_cols    = list(st.session_state.df.columns)
+    _col_order_key  = f"col_order_{_active}"
+    _saved_order    = st.session_state.get(_col_order_key, _all_df_cols)
+    # 保存済み列順に新列を末尾追記・削除済み列を除去して整合性を保つ
+    _saved_order    = [c for c in _saved_order if c in _all_df_cols]
+    _saved_order   += [c for c in _all_df_cols if c not in _saved_order]
+
+    with st.expander("⚙️ 列の表示・順序設定", expanded=False):
+        st.caption(
+            "表示したい列を選び、**選んだ順番が列の並び順**になります。"
+            "「💾 保存」を押すとリロード後も維持されます。"
+        )
+        _sel_cols = st.multiselect(
+            "表示列（上から選んだ順に左→右で表示）",
+            options=_all_df_cols,
+            default=_saved_order,
+            key=f"col_order_ms_{_active}",
+        )
+        _co1, _co2 = st.columns([0.2, 0.8])
+        with _co1:
+            if st.button("💾 保存", key=f"save_col_order_{_active}", use_container_width=True):
+                _order_to_save = _sel_cols if _sel_cols else _all_df_cols
+                st.session_state[_col_order_key] = _order_to_save
+                save_state(_active)
+                st.success("列順を保存しました")
+                st.rerun()
+        with _co2:
+            if st.button("↩️ デフォルトに戻す", key=f"reset_col_order_{_active}", use_container_width=True):
+                st.session_state[_col_order_key] = _all_df_cols
+                save_state(_active)
+                st.rerun()
+
+    # 表示に使う列順（保存済みまたはデフォルト）
+    _display_col_order = st.session_state.get(_col_order_key, _all_df_cols)
+    _display_col_order = [c for c in _display_col_order if c in _all_df_cols]
+    if not _display_col_order:
+        _display_col_order = _all_df_cols
+
     st.divider()
     col_tbl, col_up, col_dn, col_clr, col_del = st.columns([0.81, 0.0475, 0.0475, 0.0475, 0.0475])
 
     with col_tbl:
         edited = st.data_editor(
             st.session_state.df,
+            column_order=_display_col_order,
             column_config={
                 "銘柄コード":     st.column_config.TextColumn("銘柄コード",     width="small"),
                 "銘柄名":         st.column_config.TextColumn("銘柄名",         width="medium"),
@@ -1307,16 +1352,32 @@ def render_position_tab() -> None:
             _pnl_df[_col] = pd.to_numeric(_pnl_df[_col], errors="coerce")
 
         def _pnl_cell_color(val):
-            if pd.isna(val):
+            try:
+                if pd.isna(val):
+                    return ""
+            except Exception:
                 return ""
-            return "color: #16a34a; font-weight: 600" if val >= 0 else "color: #dc2626; font-weight: 600"
+            return "color: #16a34a; font-weight: 600" if float(val) >= 0 else "color: #dc2626; font-weight: 600"
 
-        _styled_pnl = (
-            _pnl_df.style
-            .applymap(_pnl_cell_color, subset=["損益率(%)", "損益額(円)"])
-            .format({"損益率(%)": "{:+.2f}%", "損益額(円)": "¥{:+,.0f}"}, na_rep="—")
-        )
-        st.dataframe(_styled_pnl, use_container_width=True, hide_index=True)
+        def _fmt_pct(v):
+            try:
+                return f"{float(v):+.2f}%" if pd.notna(v) else "—"
+            except Exception:
+                return "—"
+
+        def _fmt_yen(v):
+            try:
+                return f"¥{float(v):+,.0f}" if pd.notna(v) else "—"
+            except Exception:
+                return "—"
+
+        _style_obj = _pnl_df.style.format({"損益率(%)": _fmt_pct, "損益額(円)": _fmt_yen})
+        # pandas 2.1+ は map、旧版は applymap
+        try:
+            _style_obj = _style_obj.map(_pnl_cell_color, subset=["損益率(%)", "損益額(円)"])
+        except AttributeError:
+            _style_obj = _style_obj.applymap(_pnl_cell_color, subset=["損益率(%)", "損益額(円)"])
+        st.dataframe(_style_obj, use_container_width=True, hide_index=True)
 
 
 def render_screener_tab() -> None:
