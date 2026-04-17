@@ -1134,7 +1134,6 @@ def render_position_tab() -> None:
     with col_tbl:
         edited = st.data_editor(
             st.session_state.df,
-            key=f"pos_df_{_active}",
             column_config={
                 "銘柄コード":     st.column_config.TextColumn("銘柄コード",     width="small"),
                 "銘柄名":         st.column_config.TextColumn("銘柄名",         width="medium"),
@@ -1179,52 +1178,67 @@ def render_position_tab() -> None:
             if st.button("🗑️", key=f"del_{i}", use_container_width=True):
                 delete_row(i); save_state(); st.rerun()
 
-    for i in range(n_rows):
-        row = edited.iloc[i]
-        st.session_state.df.at[i, "銘柄コード"] = row["銘柄コード"] or ""
-        st.session_state.df.at[i, "保有株数"]   = row["保有株数"]
-        st.session_state.df.at[i, "建玉時株価"] = row["建玉時株価"]
-        st.session_state.df.at[i, "売買"]       = row["売買"] or "買い"
+    _loop_count = min(n_rows, len(edited))
+    for i in range(_loop_count):
+        try:
+            row = edited.iloc[i]
 
-        new_ticker  = normalize_ticker((row["銘柄コード"] or "").strip())
-        prev_ticker = st.session_state.prev_tickers[i]
-
-        if new_ticker != prev_ticker:
-            if new_ticker:
-                with st.spinner(f"🔄 {new_ticker} のデータを取得中..."):
-                    try:
-                        market    = fetch_market_data(new_ticker)
-                        japan     = is_japan_stock(new_ticker)
-                        fx        = 1.0 if japan else fetch_exchange_rate()
-                        st.session_state.fx_rates[i] = fx
-
-                        name      = get_ticker_name(new_ticker)
-                        unit_size = calc_unit_size(capital, risk_pct, market.atr, japan, fx)
-                        entry     = _floor_jp(round(market.close, 2), japan)
-                        losscut   = calc_losscut(entry, market.atr, losscut_mult, True, japan)
-
-                        for k, v in {
-                            "銘柄コード":       new_ticker, "銘柄名": name,
-                            "前日終値":         entry, "ATR": market.atr,
-                            "ユニットサイズ":   unit_size if unit_size is not None else NAN,
-                            "建玉時株価":       entry, "1日のリスク": NAN,
-                            "ロスカットライン": losscut if losscut is not None else NAN,
-                            "購入価格(円)": NAN, "購入価格(USD)": NAN,
-                        }.items():
-                            st.session_state.df.at[i, k] = v
-                    except Exception as e:
-                        st.error(f"行{i + 1} [{new_ticker}] データ取得失敗 → {e}")
+            # 銘柄コードを NaN / None / float 安全に文字列化
+            _raw = row["銘柄コード"]
+            if _raw is None or (isinstance(_raw, float) and pd.isna(_raw)):
+                _code_str = ""
             else:
-                for k, v in empty_row().items():
-                    st.session_state.df.at[i, k] = v
-                st.session_state.fx_rates[i] = 1.0
+                _code_str = str(_raw).strip()
+            if _code_str.lower() in ("nan", "none"):
+                _code_str = ""
 
-            st.session_state.prev_tickers[i] = new_ticker
-            save_state()   # ティッカー変更で自動保存
-            needs_rerun = True
-        elif new_ticker:
-            if recalc_row(i, capital, risk_pct, losscut_mult):
+            st.session_state.df.at[i, "銘柄コード"] = _code_str
+            st.session_state.df.at[i, "保有株数"]   = row["保有株数"]
+            st.session_state.df.at[i, "建玉時株価"] = row["建玉時株価"]
+            st.session_state.df.at[i, "売買"]       = row["売買"] or "買い"
+
+            new_ticker  = normalize_ticker(_code_str)
+            prev_ticker = st.session_state.prev_tickers[i]
+
+            if new_ticker != prev_ticker:
+                if new_ticker:
+                    with st.spinner(f"🔄 {new_ticker} のデータを取得中..."):
+                        try:
+                            market    = fetch_market_data(new_ticker)
+                            japan     = is_japan_stock(new_ticker)
+                            fx        = 1.0 if japan else fetch_exchange_rate()
+                            st.session_state.fx_rates[i] = fx
+
+                            name      = get_ticker_name(new_ticker)
+                            unit_size = calc_unit_size(capital, risk_pct, market.atr, japan, fx)
+                            entry     = _floor_jp(round(market.close, 2), japan)
+                            losscut   = calc_losscut(entry, market.atr, losscut_mult, True, japan)
+
+                            for k, v in {
+                                "銘柄コード":       new_ticker, "銘柄名": name,
+                                "前日終値":         entry, "ATR": market.atr,
+                                "ユニットサイズ":   unit_size if unit_size is not None else NAN,
+                                "建玉時株価":       entry, "1日のリスク": NAN,
+                                "ロスカットライン": losscut if losscut is not None else NAN,
+                                "購入価格(円)": NAN, "購入価格(USD)": NAN,
+                            }.items():
+                                st.session_state.df.at[i, k] = v
+                        except Exception as e:
+                            st.error(f"行{i + 1} [{new_ticker}] データ取得失敗 → {e}")
+                else:
+                    for k, v in empty_row().items():
+                        st.session_state.df.at[i, k] = v
+                    st.session_state.fx_rates[i] = 1.0
+
+                st.session_state.prev_tickers[i] = new_ticker
+                save_state()
                 needs_rerun = True
+            elif new_ticker:
+                if recalc_row(i, capital, risk_pct, losscut_mult):
+                    needs_rerun = True
+
+        except Exception as _row_e:
+            st.error(f"行{i + 1} 処理エラー: {_row_e}")
 
     if needs_rerun:
         st.rerun()
