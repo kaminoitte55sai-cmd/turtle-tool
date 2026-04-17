@@ -144,6 +144,15 @@ except Exception:
 
 EDINETDB_MCP_URL  = "https://edinetdb.jp/mcp"
 
+# J-Quants API（JPX公式、理論株価計算の主データソース）
+try:
+    JQUANTS_REFRESH_TOKEN = st.secrets["JQUANTS_REFRESH_TOKEN"]
+except Exception:
+    JQUANTS_REFRESH_TOKEN = "oi4woGg05PUMAi2Lx8WJm2udTm6_H2by1peFcYQaQOU"  # ローカル開発用
+
+JQUANTS_AUTH_URL  = "https://api.jquants.com/v1/token/auth_refresh"
+JQUANTS_FINS_URL  = "https://api.jquants.com/v1/fins/statements"
+
 # クラウド環境検出（Streamlit Cloud = Linux）
 import platform as _platform
 _IS_WINDOWS = _platform.system() == "Windows"
@@ -2138,6 +2147,129 @@ def edinet_get_shareholders(sec_code: str) -> dict:
     return _call_edinetdb("get_shareholders", edinet_code=edinet_code)
 
 
+# ===========================================================================
+# J-Quants API ヘルパー（理論株価計算の主データソース）
+# ===========================================================================
+
+@st.cache_data(ttl=82800, show_spinner=False)   # 23時間キャッシュ（IDトークンは24時間有効）
+def _jquants_get_id_token() -> str:
+    """リフレッシュトークンから J-Quants IDトークンを取得する。"""
+    if not JQUANTS_REFRESH_TOKEN:
+        return ""
+    try:
+        resp = _req.post(
+            JQUANTS_AUTH_URL,
+            params={"refreshtoken": JQUANTS_REFRESH_TOKEN},
+            timeout=10,
+        )
+        return resp.json().get("idToken", "")
+    except Exception:
+        return ""
+
+
+@st.cache_data(ttl=3600, show_spinner=False)    # 1時間キャッシュ
+def jquants_get_statements(code: str) -> dict:
+    """
+    証券コード(4桁) → J-Quants fins/statements の最新データを返す。
+
+    返却フィールド（すべて円・株数ベースに正規化済み）:
+      equity          : 純資産（円）
+      totalAssets     : 総資産（円）
+      forecastOrdinaryProfit : 予想経常利益（円）
+      forecastNetIncome      : 予想純利益（円）
+      sharesOutstanding      : 発行済株式数（自己株式除く）
+      equityRatio            : 自己資本比率（小数）
+      bps             : 純資産÷発行済株式数（円）
+      roa_forecast    : 予想純利益÷総資産（小数）
+    """
+    id_token = _jquants_get_id_token()
+    if not id_token:
+        return {"error": "IDトークン取得失敗（リフレッシュトークンを確認してください）"}
+    try:
+        resp = _req.get(
+            JQUANTS_FINS_URL,
+            params={"code": code},
+            headers={"Authorization": f"Bearer {id_token}"},
+            timeout=15,
+        )
+        data = resp.json()
+    except Exception as e:
+        return {"error": str(e)}
+
+    statements = data.get("statements", [])
+    if not statements:
+        return {"error": f"データなし (code={code})"}
+
+    # 最新エントリ（リストの先頭）
+    s = statements[0]
+
+    def _f(key):
+        """文字列→float、空文字・None は None を返す。"""
+        v = s.get(key)
+        if v in (None, "", "-", "—", "N/A"):
+            return None
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return None
+
+    # ── 発行済株式数（自己株式除く）─────────────────────────────────────
+    issued   = _f("NumberOfIssuedAndOutstandingSharesAtTheEndOfFiscalYearIncludingTreasuryStock")
+    treasury = _f("NumberOfTreasuryStockAtTheEndOfFiscalYear") or 0.0
+    shares   = (issued - treasury) if issued else None
+
+    # ── 財務数値（J-Quants は百万円単位で返す）────────────────────────────
+    _M = 1_000_000   # 百万円 → 円
+    equity_m    = _f("Equity")                   # 百万円
+    ta_m        = _f("TotalAssets")              # 百万円
+    fo_oi_m     = _f("ForecastOrdinaryProfit")   # 百万円
+    fo_ni_m     = _f("ForecastProfit")           # 百万円
+
+    equity   = equity_m  * _M if equity_m  is not None else None
+    ta       = ta_m      * _M if ta_m      is not None else None
+    fo_oi    = fo_oi_m   * _M if fo_oi_m   is not None else None
+    fo_ni    = fo_ni_m   * _M if fo_ni_m   is not None else None
+
+    # ── 自己資本比率（パーセント or 小数どちらでも対応）─────────────────
+    eq_ratio_raw = _f("EquityToAssetRatio")
+    if eq_ratio_raw is not None:
+        eq_ratio = eq_ratio_raw / 100 if eq_ratio_raw > 1 else eq_ratio_raw
+    elif equity and ta and ta > 0:
+        eq_ratio = equity / ta
+    else:
+        eq_ratio = None
+
+    # ── BPS = 純資産 ÷ 発行済株式数 ─────────────────────────────────────
+    bps = None
+    if equity and shares and shares > 0:
+        bps = equity / shares
+
+    # ── ROA = 予想純利益 ÷ 総資産 ────────────────────────────────────────
+    roa_forecast = None
+    if fo_ni and ta and ta > 0:
+        roa_forecast = fo_ni / ta
+
+    return {
+        "equity":                 equity,
+        "totalAssets":            ta,
+        "forecastOrdinaryProfit": fo_oi,
+        "forecastNetIncome":      fo_ni,
+        "sharesOutstanding":      shares,
+        "equityRatio":            eq_ratio,
+        "bps":                    bps,
+        "roa_forecast":           roa_forecast,
+        # デバッグ用
+        "_equity_m":   equity_m,
+        "_ta_m":       ta_m,
+        "_fo_oi_m":    fo_oi_m,
+        "_fo_ni_m":    fo_ni_m,
+        "_shares_raw": issued,
+        "_treasury":   treasury,
+        "_typeOfDoc":  s.get("TypeOfDocument", ""),
+        "_period":     s.get("CurrentFiscalYearEndDate", ""),
+    }
+
+
 @st.cache_data(ttl=86400, show_spinner=False)   # 1日キャッシュ
 def edinet_get_financials(sec_code: str) -> dict:
     """証券コード(4桁) → EdinetDB get_financials 最新年度データを返す（単位:円）。
@@ -2225,58 +2357,68 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
     ▸ 市場リスク = (資産価値+事業価値) × リーマンショックルール補正率
                    PBR ≥ 0.5 なら 0%（減額なし）
 
-    データソース優先順位:
-      BPS         : get_financials.bps → 現在値÷PBR → EPS÷ROE
-      ROA         : get_financials.(netIncome÷totalAssets) → ROE×自己資本比率
-      予想経常利益 : get_earnings.forecastOrdinaryIncome → forecastNetIncome÷0.7
-      発行済株式数 : get_earnings.sharesOutstanding → get_financials.sharesIssued
-      自己資本比率 : get_financials.equityRatioOfficial → get_earnings.equityRatio
-      PBR         : get_financials.pbr → get_company.priceToBook/pbr
+    データソース優先順位（J-Quants優先 → EdinetDB fallback）:
+      BPS         : JQ.純資産÷発行済株式数 → EDB.netAssets/shares → EDB.bps → 現在値÷PBR
+      自己資本比率 : JQ.equityRatio → EDB.equityRatioOfficial → EDB.equityRatio
+      ROA         : JQ.roa_forecast → EDB.forecastNetIncome/totalAssets → ROE×自己資本比率
+      予想経常利益 : JQ.forecastOrdinaryProfit → EDB.forecastOrdinaryIncome
+      発行済株式数 : JQ.sharesOutstanding → EDB.sharesOutstanding/sharesIssued
+      PBR         : 現在株価÷BPS（自前算出）→ EDB.pbr
     """
     # ── データ取得 ─────────────────────────────────────────────────────────
     try:
-        edb  = edinet_get_company(sec_code)
+        edb = edinet_get_company(sec_code)
     except Exception as _e:
         return {"error": f"get_company 失敗: {_e}"}
     if not isinstance(edb, dict) or "error" in edb:
         return {"error": edb.get("error", "get_company 失敗") if isinstance(edb, dict) else "get_company 失敗"}
 
     try:
-        fin  = edinet_get_financials(sec_code)        # 財務諸表（年次、単位:円）
+        jq = jquants_get_statements(sec_code)          # J-Quants（主ソース）
     except Exception:
-        fin  = {}
+        jq = {}
     try:
-        earn = edinet_get_latest_earnings(sec_code)   # 最新決算短信（単位:百万円）
+        fin = edinet_get_financials(sec_code)           # EdinetDB 財務諸表（fallback）
+    except Exception:
+        fin = {}
+    try:
+        earn = edinet_get_latest_earnings(sec_code)     # EdinetDB 決算短信（fallback）
     except Exception:
         earn = {}
 
+    if not isinstance(jq,   dict): jq   = {}
     if not isinstance(fin,  dict): fin  = {}
     if not isinstance(earn, dict): earn = {}
+    # J-Quants がエラーの場合は空に
+    if "error" in jq and len(jq) == 1: jq = {}
 
-    # ── 1株純資産（BPS）= 純資産 ÷ 発行済株式数 ─────────────────────────
-    # 純資産: fin（円）優先、なければ earn（百万円→円換算）
-    # 発行済株式数: earn.sharesOutstanding 優先、なければ fin.sharesIssued
-    _net_assets = fin.get("netAssets")                         # 円
-    if not _net_assets or _net_assets <= 0:
-        _na_earn = earn.get("netAssets") or earn.get("ownersEquity")
-        if _na_earn and _na_earn > 0:
-            _net_assets = _na_earn * 1_000_000                 # 百万円→円
-    _shares_bps = earn.get("sharesOutstanding") or fin.get("sharesIssued")
-
+    # ════════════════════════════════════════════════════════════════════════
+    # BPS = 純資産 ÷ 発行済株式数
+    # ════════════════════════════════════════════════════════════════════════
     bps     = None
     bps_src = ""
-    if _net_assets and _net_assets > 0 and _shares_bps and _shares_bps > 0:
-        bps     = _net_assets / _shares_bps
+
+    # ① J-Quants: 純資産(円) ÷ 発行済株式数
+    if jq.get("bps") and jq["bps"] > 0:
+        bps     = jq["bps"]
+        _eq_m   = jq.get("_equity_m")
+        _sh     = jq.get("sharesOutstanding")
         bps_src = (
-            f"純資産({_net_assets/1e8:.1f}億円)"
-            f"÷発行済株式数({_shares_bps:,}株)"
+            f"純資産({_eq_m:,.0f}百万円)÷発行済株式数({_sh:,.0f}株) [J-Quants]"
+            if _eq_m and _sh else "J-Quants"
         )
     else:
-        # フォールバック: APIの既算BPS → 現在株価÷PBR → EPS÷ROE
-        _bps_api = fin.get("bps")
-        if _bps_api and _bps_api > 0:
-            bps     = _bps_api
-            bps_src = "get_financials.bps（直接取得）"
+        # ② EdinetDB fin.netAssets ÷ earn.sharesOutstanding
+        _na_fin  = fin.get("netAssets")                           # 円
+        _na_earn = earn.get("netAssets") or earn.get("ownersEquity")
+        _net_assets = _na_fin or (_na_earn * 1_000_000 if _na_earn else None)
+        _shares_bps = earn.get("sharesOutstanding") or fin.get("sharesIssued")
+        if _net_assets and _net_assets > 0 and _shares_bps and _shares_bps > 0:
+            bps     = _net_assets / _shares_bps
+            bps_src = f"純資産({_net_assets/1e8:.1f}億円)÷株式数({_shares_bps:,}株) [EdinetDB]"
+        elif fin.get("bps") and fin["bps"] > 0:
+            bps     = fin["bps"]
+            bps_src = "EdinetDB get_financials.bps"
         else:
             pbr_v = fin.get("pbr") or edb.get("priceToBook") or edb.get("pbr")
             if pbr_v and pbr_v > 0 and current_price > 0:
@@ -2289,66 +2431,93 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
                     bps     = eps_v / roe_v
                     bps_src = "EPS÷ROE（推定）"
 
-    # ── 自己資本比率（小数）───────────────────────────────────────────────
-    equity_ratio = fin.get("equityRatioOfficial")
-    eq_src = "get_financials"
-    if equity_ratio is None:
+    # ════════════════════════════════════════════════════════════════════════
+    # 自己資本比率（小数）
+    # ════════════════════════════════════════════════════════════════════════
+    equity_ratio = None
+    eq_src       = ""
+
+    if jq.get("equityRatio") is not None:
+        equity_ratio = jq["equityRatio"]
+        eq_src = "J-Quants"
+    elif fin.get("equityRatioOfficial") is not None:
+        equity_ratio = fin["equityRatioOfficial"]
+        eq_src = "EdinetDB get_financials"
+    else:
         eq_raw = earn.get("equityRatio")
         if eq_raw is not None:
             equity_ratio = eq_raw / 100 if eq_raw > 1 else eq_raw
-            eq_src = "get_earnings"
-        else:
-            equity_ratio = edb.get("equityRatio")
-            eq_src = "get_company"
+            eq_src = "EdinetDB get_earnings"
+        elif edb.get("equityRatio") is not None:
+            equity_ratio = edb["equityRatio"]
+            eq_src = "EdinetDB get_company"
 
-    # ── ROA（総資産利益率）────────────────────────────────────────────────
-    # 予想純利益を優先使用。総資産は fin（円）、なければ earn（百万円→円換算）。
+    # ════════════════════════════════════════════════════════════════════════
+    # ROA = 予想純利益 ÷ 総資産
+    # ════════════════════════════════════════════════════════════════════════
     roa     = None
     roa_src = ""
 
-    _forecast_ni = earn.get("forecastNetIncome")   # 百万円
-    _ta_fin      = fin.get("totalAssets")          # 円
-    _ta_earn     = earn.get("totalAssets")          # 百万円（最新Q末）
-
-    # ① 予想純利益 ÷ 総資産（fin）
-    if _forecast_ni and _ta_fin and _ta_fin > 0:
-        roa     = (_forecast_ni * 1_000_000) / _ta_fin
-        roa_src = f"予想純利益({_forecast_ni:,}百万円)÷総資産({_ta_fin/1e8:.1f}億円)"
-    # ② 予想純利益 ÷ 総資産（earn）
-    elif _forecast_ni and _ta_earn and _ta_earn > 0:
-        roa     = _forecast_ni / _ta_earn          # 両方百万円なので比率は同じ
-        roa_src = f"予想純利益({_forecast_ni:,}百万円)÷総資産({_ta_earn:,}百万円)"
-    # ③ 実績純利益 ÷ 総資産（フォールバック）
-    elif fin.get("netIncome") and _ta_fin and _ta_fin > 0:
-        _ni_act = fin["netIncome"]
-        roa     = _ni_act / _ta_fin
-        roa_src = f"実績純利益({_ni_act/1e8:.1f}億円)÷総資産({_ta_fin/1e8:.1f}億円)【予想なし】"
-    # ④ ROE × 自己資本比率（最終フォールバック）
-    else:
-        roe_v = fin.get("roeOfficial") or edb.get("roe")
-        if roe_v and equity_ratio and equity_ratio > 0:
-            roa     = roe_v * equity_ratio
-            roa_src = "ROE×自己資本比率（推定）"
-
-    # ── PER計算用EPS = 予想経常利益×0.7÷発行済株式数 ────────────────────
-    forecast_oi = earn.get("forecastOrdinaryIncome")  # 百万円
-    shares      = earn.get("sharesOutstanding") or fin.get("sharesIssued")  # 株数
-
-    per_eps     = None
-    per_eps_src = ""
-    if forecast_oi is not None and shares and shares > 0:
-        # 予想経常利益は百万円単位なので ×1,000,000 で円換算
-        per_eps     = forecast_oi * 1_000_000 * 0.7 / shares
-        per_eps_src = (
-            f"予想経常利益 {forecast_oi:,}百万円×0.7"
-            f"÷発行済株式数 {shares:,}株"
+    # ① J-Quants（予想純利益÷総資産、同一単位なので比率そのまま）
+    if jq.get("roa_forecast") is not None:
+        roa     = jq["roa_forecast"]
+        _fni_m  = jq.get("_fo_ni_m")
+        _ta_m   = jq.get("_ta_m")
+        roa_src = (
+            f"予想純利益({_fni_m:,.0f}百万円)÷総資産({_ta_m:,.0f}百万円) [J-Quants]"
+            if _fni_m and _ta_m else "J-Quants"
         )
     else:
-        # フォールバック: forecastNetIncome÷0.7÷shares → forecastEps → 実績EPS
-        fni = earn.get("forecastNetIncome")
-        if fni and shares and shares > 0:
-            per_eps     = fni * 1_000_000 / shares
-            per_eps_src = f"予想純利益 {fni:,}百万円÷株式数（経常利益代用）"
+        # ② EdinetDB: forecastNetIncome(百万円) ÷ totalAssets(円 or 百万円)
+        _fni_edb = earn.get("forecastNetIncome")
+        _ta_fin  = fin.get("totalAssets")
+        _ta_earn = earn.get("totalAssets")
+        if _fni_edb and _ta_fin and _ta_fin > 0:
+            roa     = (_fni_edb * 1_000_000) / _ta_fin
+            roa_src = f"予想純利益({_fni_edb:,}百万円)÷総資産({_ta_fin/1e8:.1f}億円) [EdinetDB]"
+        elif _fni_edb and _ta_earn and _ta_earn > 0:
+            roa     = _fni_edb / _ta_earn
+            roa_src = f"予想純利益({_fni_edb:,}百万円)÷総資産({_ta_earn:,}百万円) [EdinetDB]"
+        elif fin.get("netIncome") and _ta_fin and _ta_fin > 0:
+            _ni_act = fin["netIncome"]
+            roa     = _ni_act / _ta_fin
+            roa_src = f"実績純利益({_ni_act/1e8:.1f}億円)÷総資産({_ta_fin/1e8:.1f}億円)【予想なし】"
+        else:
+            roe_v = fin.get("roeOfficial") or edb.get("roe")
+            if roe_v and equity_ratio and equity_ratio > 0:
+                roa     = roe_v * equity_ratio
+                roa_src = "ROE×自己資本比率（推定）"
+
+    # ════════════════════════════════════════════════════════════════════════
+    # PER計算用EPS = 予想経常利益 × 0.7 ÷ 発行済株式数
+    # ════════════════════════════════════════════════════════════════════════
+    per_eps     = None
+    per_eps_src = ""
+
+    # ① J-Quants: forecastOrdinaryProfit(円) ÷ sharesOutstanding
+    _jq_foi    = jq.get("forecastOrdinaryProfit")   # 円
+    _jq_shares = jq.get("sharesOutstanding")
+    if _jq_foi and _jq_shares and _jq_shares > 0:
+        per_eps     = _jq_foi * 0.7 / _jq_shares
+        _jq_foi_m   = jq.get("_fo_oi_m")
+        per_eps_src = (
+            f"予想経常利益({_jq_foi_m:,.0f}百万円)×0.7÷株式数({_jq_shares:,.0f}株) [J-Quants]"
+            if _jq_foi_m else "J-Quants"
+        )
+    else:
+        # ② EdinetDB: forecastOrdinaryIncome(百万円) ÷ shares
+        _edb_foi    = earn.get("forecastOrdinaryIncome")   # 百万円
+        _edb_shares = earn.get("sharesOutstanding") or fin.get("sharesIssued")
+        if _edb_foi is not None and _edb_shares and _edb_shares > 0:
+            per_eps     = _edb_foi * 1_000_000 * 0.7 / _edb_shares
+            per_eps_src = (
+                f"予想経常利益({_edb_foi:,}百万円)×0.7"
+                f"÷株式数({_edb_shares:,}株) [EdinetDB]"
+            )
+        elif earn.get("forecastNetIncome") and _edb_shares and _edb_shares > 0:
+            _fni2 = earn["forecastNetIncome"]
+            per_eps     = _fni2 * 1_000_000 / _edb_shares
+            per_eps_src = f"予想純利益({_fni2:,}百万円)÷株式数（経常利益代用）"
         elif earn.get("forecastEps"):
             per_eps     = earn["forecastEps"]
             per_eps_src = "予想EPS（直接取得）"
@@ -2356,10 +2525,14 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
             per_eps     = edb["eps"]
             per_eps_src = "実績EPS（フォールバック）"
 
-    # ── PBR（市場リスク判定用）────────────────────────────────────────────
-    pbr = fin.get("pbr") or edb.get("priceToBook") or edb.get("pbr")
-    if not pbr and bps and bps > 0 and current_price > 0:
+    # ════════════════════════════════════════════════════════════════════════
+    # PBR = 現在株価 ÷ BPS（自前算出優先）
+    # ════════════════════════════════════════════════════════════════════════
+    pbr = None
+    if bps and bps > 0 and current_price > 0:
         pbr = current_price / bps
+    if not pbr:
+        pbr = fin.get("pbr") or edb.get("priceToBook") or edb.get("pbr")
 
     # ── バリデーション ─────────────────────────────────────────────────────
     missing = []
