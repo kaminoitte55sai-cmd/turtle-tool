@@ -114,11 +114,13 @@ MARGIN_BALANCE = 5_000_000
 READONLY_COLS = [
     "銘柄名", "前日終値", "ATR", "ユニットサイズ", "1日のリスク",
     "ロスカットライン", "購入価格(円)", "購入価格(USD)",
+    "評価損益率(%)", "評価損益額(円)",
 ]
 
 NUMERIC_COLS = [
     "前日終値", "ATR", "ユニットサイズ", "保有株数", "1日のリスク",
     "建玉時株価", "ロスカットライン", "購入価格(円)", "購入価格(USD)",
+    "評価損益率(%)", "評価損益額(円)",
 ]
 
 NAN          = float("nan")
@@ -277,6 +279,8 @@ def empty_row() -> dict:
         "ロスカットライン": NAN,
         "購入価格(円)":     NAN,
         "購入価格(USD)":    NAN,
+        "評価損益率(%)":    NAN,
+        "評価損益額(円)":   NAN,
     }
 
 
@@ -523,6 +527,31 @@ def recalc_row(i: int, capital: float, risk_pct: float, losscut_mult: float) -> 
     if not (not _ok(new_usd) and not _ok(cur_usd)) and new_usd != cur_usd:
         df.at[i, "購入価格(USD)"] = new_usd if new_usd is not None else NAN
         changed = True
+
+    # ── 評価損益率 / 評価損益額 ─────────────────────────────────────────────
+    cur_price  = df.at[i, "前日終値"]
+    entry_price = df.at[i, "建玉時株価"]
+    shares      = df.at[i, "保有株数"]
+    if _ok(cur_price) and _ok(entry_price) and float(entry_price) != 0:
+        sign    = 1.0 if df.at[i, "売買"] == "買い" else -1.0
+        pnl_pct = sign * (float(cur_price) - float(entry_price)) / float(entry_price) * 100
+        new_pnl_pct = round(pnl_pct, 2)
+        if new_pnl_pct != df.at[i, "評価損益率(%)"]:
+            df.at[i, "評価損益率(%)"] = new_pnl_pct
+            changed = True
+        if _ok(shares):
+            pnl_amount = sign * (float(cur_price) - float(entry_price)) * float(shares) * fx
+            new_pnl_amt = round(pnl_amount, 0)
+            if new_pnl_amt != df.at[i, "評価損益額(円)"]:
+                df.at[i, "評価損益額(円)"] = new_pnl_amt
+                changed = True
+    else:
+        if _ok(df.at[i, "評価損益率(%)"]):
+            df.at[i, "評価損益率(%)"] = NAN
+            changed = True
+        if _ok(df.at[i, "評価損益額(円)"]):
+            df.at[i, "評価損益額(円)"] = NAN
+            changed = True
 
     return changed
 
@@ -940,30 +969,32 @@ def render_position_tab() -> None:
     st.divider()
 
     # ════════════════════════════════════════════════════════════════════════
-    # ▼ 以下は既存のポジション表示・設定
+    # ▼ ポジション設定 & サマリー
     # ════════════════════════════════════════════════════════════════════════
     n_rows = st.session_state.n_rows
 
     total_purchase = float(st.session_state.df["購入価格(円)"].dropna().sum())
     balance        = st.session_state.capital - total_purchase
 
-    # タイトル ＋ 右上残高
-    title_col, bal_col = st.columns([0.5, 0.5])
-    with title_col:
-        st.title("🐢 タートルズ ポジションサイズ計算ツール")
-    with bal_col:
-        st.markdown(
-            f"""
-            <div style="text-align:right; padding-top:20px; line-height:2.2;">
-              <span style="color:#888; font-size:13px;">残高</span>&nbsp;&nbsp;
-              <strong style="font-size:18px;">¥{balance:,.0f}-</strong>
-              &nbsp;&nbsp;&nbsp;&nbsp;
-              <span style="color:#888; font-size:13px;">信用取引残高</span>&nbsp;&nbsp;
-              <strong style="font-size:18px;">¥{MARGIN_BALANCE:,.0f}-</strong>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    # ── 評価損益サマリーを計算 ────────────────────────────────────────────
+    _pnl_series = st.session_state.df["評価損益額(円)"].dropna() \
+        if "評価損益額(円)" in st.session_state.df.columns else pd.Series([], dtype=float)
+    _pnl_total  = float(_pnl_series.sum()) if len(_pnl_series) > 0 else 0.0
+    _pnl_gain   = float(_pnl_series[_pnl_series > 0].sum()) if len(_pnl_series) > 0 else 0.0
+    _pnl_loss   = float(_pnl_series[_pnl_series < 0].sum()) if len(_pnl_series) > 0 else 0.0
+    _pos_count  = int((st.session_state.df["銘柄コード"] != "").sum())
+
+    # ── サマリーメトリクス行 ──────────────────────────────────────────────
+    _m1, _m2, _m3, _m4, _m5 = st.columns(5)
+    _m1.metric("💴 残高", f"¥{balance:,.0f}")
+    _m2.metric(
+        "📈 評価損益合計",
+        f"¥{_pnl_total:+,.0f}",
+        delta=f"{_pnl_total/st.session_state.capital*100:+.2f}%" if st.session_state.capital else None,
+    )
+    _m3.metric("🟢 含み益", f"¥{_pnl_gain:+,.0f}")
+    _m4.metric("🔴 含み損", f"¥{_pnl_loss:+,.0f}")
+    _m5.metric("📋 保有銘柄数", f"{_pos_count} 銘柄")
 
     c1, c2, c3, c4 = st.columns(4)
 
@@ -1031,6 +1062,8 @@ def render_position_tab() -> None:
                 "ロスカットライン": st.column_config.NumberColumn("ロスカットライン", format="%.2f", width="small"),
                 "購入価格(円)":   st.column_config.NumberColumn("購入価格(円)",  format="¥%.0f", width="small"),
                 "購入価格(USD)":  st.column_config.NumberColumn("購入価格(USD)", format="$%.2f", width="small"),
+                "評価損益率(%)":  st.column_config.NumberColumn("損益率(%)",     format="%.2f%%", width="small"),
+                "評価損益額(円)": st.column_config.NumberColumn("評価損益(円)",  format="¥%.0f", width="small"),
             },
             disabled=READONLY_COLS,
             use_container_width=True,
