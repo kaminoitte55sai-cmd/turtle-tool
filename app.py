@@ -142,6 +142,16 @@ try:
 except Exception:
     EDINETDB_API_KEY = "edb_473632966cd7b89fda850fde6baa05f6"  # ローカル開発用フォールバック
 
+# GitHub API（データファイルをリポジトリに永続化するために使用）
+try:
+    GITHUB_TOKEN = st.secrets["GITHUB_TOKEN"]
+except Exception:
+    GITHUB_TOKEN = ""
+try:
+    GITHUB_REPO = st.secrets["GITHUB_REPO"]
+except Exception:
+    GITHUB_REPO = "kaminoitte55sai-cmd/turtle-tool"
+
 EDINETDB_MCP_URL  = "https://edinetdb.jp/mcp"
 
 # J-Quants API（JPX公式、理論株価計算の主データソース）
@@ -2732,9 +2742,42 @@ def load_analysis_result(filename: str) -> str:
         return ""
 
 
+def _push_to_github(repo_path: str, content_bytes: bytes, commit_msg: str = "Update data") -> bool:
+    """GitHub API でファイルをリポジトリに書き戻す。
+    GITHUB_TOKEN が未設定の場合は何もしない（ローカル実行時）。
+    """
+    import base64 as _b64
+    if not GITHUB_TOKEN:
+        return False
+    _api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{repo_path}"
+    _hdrs = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    try:
+        # 現在のファイル SHA を取得（更新時に必須）
+        _r = _req.get(_api, headers=_hdrs, timeout=10)
+        _sha = _r.json().get("sha", "") if _r.status_code == 200 else ""
+        _payload: dict = {
+            "message": commit_msg,
+            "content": _b64.b64encode(content_bytes).decode(),
+        }
+        if _sha:
+            _payload["sha"] = _sha
+        _r2 = _req.put(_api, headers=_hdrs, json=_payload, timeout=15)
+        return _r2.status_code in (200, 201)
+    except Exception:
+        return False
+
+
 def save_funda_data(df: pd.DataFrame) -> None:
-    """ファンダデータを CSV に保存する"""
-    df.to_csv(FUNDA_FILE, index=False, encoding="utf-8-sig")
+    """ファンダデータをローカル CSV に保存し、GitHub にも書き戻す。"""
+    _csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+    # ローカル保存
+    with open(FUNDA_FILE, "wb") as _f:
+        _f.write(_csv_bytes)
+    # GitHub 書き戻し（Streamlit Cloud でのデプロイ後も維持）
+    _push_to_github("fundamental_list.csv", _csv_bytes, "Update watchlist")
 
 
 def load_funda_data() -> pd.DataFrame:
@@ -2746,9 +2789,13 @@ def load_funda_data() -> pd.DataFrame:
 
 
 def save_memo_data(memos: dict) -> None:
-    """メモデータを JSON に保存する"""
-    with open(MEMO_FILE, "w", encoding="utf-8") as _mf:
-        json.dump(memos, _mf, ensure_ascii=False, indent=2)
+    """メモデータをローカル JSON に保存し、GitHub にも書き戻す。"""
+    _json_bytes = json.dumps(memos, ensure_ascii=False, indent=2).encode("utf-8")
+    # ローカル保存
+    with open(MEMO_FILE, "wb") as _mf:
+        _mf.write(_json_bytes)
+    # GitHub 書き戻し
+    _push_to_github("memo_save.json", _json_bytes, "Update memos")
 
 
 def load_memo_data() -> dict:
