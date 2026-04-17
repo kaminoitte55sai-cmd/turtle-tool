@@ -3134,7 +3134,18 @@ def render_funda_tab() -> None:
         ))
 
     _RATING_OPTIONS = ["", "×", "△", "〇", "◎"]
-    _SCORE_OPTIONS  = [""] + [str(v) for v in range(-10, 0)] + ["0"] + [f"+{v}" for v in range(1, 11)]
+    _SCORE_OPTIONS  = [""] + [f"+{v}" for v in range(10, 0, -1)] + ["0"] + [str(v) for v in range(-1, -11, -1)]
+
+    def _score_fmt(v: str) -> str:
+        """スコア表示ラベル: +5以上は🔴付き、空は「—」"""
+        if v == "":
+            return "—"
+        try:
+            if int(v) >= 5:
+                return f"🔴 {v}"
+        except ValueError:
+            pass
+        return v
 
     # ── カラム定義（順序: コード 銘柄名 チャート 理論株価 G X Yahoo YT かぶたん メモ スコア 評価 NLM 📌 削除）
     _FUNDA_LABELS = ["コード", "銘柄名", "📈", "理論", "G", "𝕏", "Yahoo", "YT",
@@ -3213,17 +3224,31 @@ def render_funda_tab() -> None:
             ):
                 st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
 
-        # ── スコア（-10 〜 +10）────────────────────────────────────────
+        # ── スコア（+10〜-10 降順、+5以上は赤文字）──────────────────────
         _stored_score = str(_row.get("score", ""))
         if _stored_score not in _SCORE_OPTIONS:
             _stored_score = ""
-        _new_score = _rc[10].selectbox(
-            "スコア",
-            options=_SCORE_OPTIONS,
-            index=_SCORE_OPTIONS.index(_stored_score),
-            key=f"score_{_code_raw}",
-            label_visibility="collapsed",
-        )
+        with _rc[10]:
+            if _stored_score:
+                try:
+                    _score_val = int(_stored_score)
+                    _s_clr = "#dc2626" if _score_val >= 5 else "#374151"
+                except ValueError:
+                    _s_clr = "#374151"
+                st.markdown(
+                    f"<div style='text-align:center;font-weight:800;font-size:1.05em;"
+                    f"color:{_s_clr};line-height:1;margin-bottom:-10px;'>"
+                    f"{_stored_score}</div>",
+                    unsafe_allow_html=True,
+                )
+            _new_score = st.selectbox(
+                "スコア",
+                options=_SCORE_OPTIONS,
+                index=_SCORE_OPTIONS.index(_stored_score),
+                format_func=_score_fmt,
+                key=f"score_{_code_raw}",
+                label_visibility="collapsed",
+            )
         if _new_score != _stored_score:
             fund_df.at[_idx, "score"] = _new_score
             _any_funda_changed = True
