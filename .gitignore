@@ -1,7 +1,54 @@
-*.pkl
-*.csv
+# Python
 __pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Streamlit secrets（絶対にコミットしない）
+.streamlit/secrets.toml
+
+# ローカルデータファイル（個人データ・ポジション情報）
 turtle_save.json
-filter_save.json
+master_save.pkl
 memo_save.json
-.claude.json
+
+# ログ・一時ファイル
+logs/
+streamlit_log.txt
+*.log
+resp.json
+cacert.pem
+
+# キャッシュ
+.cache/
+*.pkl
+
+# 環境設定
+.env
+.venv/
+venv/
+env/
+
+# エディタ
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Windows固有
+Thumbs.db
+Desktop.ini
+daily_earnings_report.bat
+daily_earnings_report.ps1
+
+# MacOS
+.DS_Store
+
+# 再構築済みファイル（バックアップ）
+app_reconstructed.py
+main.py

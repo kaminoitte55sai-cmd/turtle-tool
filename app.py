@@ -127,8 +127,16 @@ MASTER_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_
 FILTER_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filter_save.json")
 FUNDA_FILE        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fundamental_list.csv")
 MEMO_FILE         = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memo_save.json")
-EDINETDB_API_KEY  = "edb_473632966cd7b89fda850fde6baa05f6"
+try:
+    EDINETDB_API_KEY = st.secrets["EDINETDB_API_KEY"]
+except Exception:
+    EDINETDB_API_KEY = "edb_473632966cd7b89fda850fde6baa05f6"  # ローカル開発用フォールバック
+
 EDINETDB_MCP_URL  = "https://edinetdb.jp/mcp"
+
+# クラウド環境検出（Streamlit Cloud = Linux）
+import platform as _platform
+_IS_WINDOWS = _platform.system() == "Windows"
 
 # フィルター設定の保存対象キー（session_state のキーと対応）
 _FILTER_KEYS = [
@@ -1179,7 +1187,7 @@ def render_screener_tab() -> None:
     with p4:
         sc_vol = st.slider(
             "🔥 出来高倍率 閾値",
-            min_value=1.0, max_value=5.0, value=1.5, step=0.1,
+            min_value=1.0, max_value=5.0, value=1.0, step=0.1,
             format="%.1f×",
             key="sc_vol",
             help="ブレイク日出来高 ÷ N日平均出来高 がこの値以上の銘柄のみ通過",
@@ -1387,6 +1395,25 @@ def render_screener_tab() -> None:
     ]
     disp_df = results_df[[c for c in col_order if c in results_df.columns]].copy()
 
+    # ── ソートコントロール ─────────────────────────────────────────────────────
+    _sort_cols, _sort_dir_col = st.columns([2, 1])
+    with _sort_cols:
+        _sort_key = st.radio(
+            "並び替え",
+            options=["経過日数", "ブレイク比(%)"],
+            horizontal=True,
+            key="sc_sort_key",
+        )
+    with _sort_dir_col:
+        _sort_asc = st.radio(
+            "順序",
+            options=["昇順 ▲", "降順 ▼"],
+            horizontal=True,
+            key="sc_sort_dir",
+        ) == "昇順 ▲"
+    if _sort_key in disp_df.columns:
+        disp_df = disp_df.sort_values(_sort_key, ascending=_sort_asc).reset_index(drop=True)
+
     def _dd_color(val):
         try:
             v = float(val)
@@ -1415,8 +1442,8 @@ def render_screener_tab() -> None:
     # ── スクリーニング結果テーブル（ファンダ追加ボタン付き）─────────────────────────
     _SC_LABELS = ["ティッカー", "銘柄名", "現在価格", "経過日数", "ブレイク比(%)",
                   "出来高倍率", "waiting_dd(%)", "delay日数", "ブレイク日", "ブレイク価格", "エントリー価格",
-                  "かぶたん", "理論株価", "チャート", "＋"]
-    _SC_WIDTHS = [0.7, 1.2, 0.8, 0.6, 0.8, 0.7, 0.8, 0.5, 0.8, 0.8, 0.9, 0.7, 0.7, 0.6, 0.5]
+                  "かぶたん", "理論株価", "チャート", "G", "＋"]
+    _SC_WIDTHS = [0.7, 1.2, 0.8, 0.6, 0.8, 0.7, 0.8, 0.5, 0.8, 0.8, 0.9, 0.7, 0.7, 0.6, 0.5, 0.5]
     _sc_hdr = st.columns(_SC_WIDTHS)
     for _hc, _lbl in zip(_sc_hdr, _SC_LABELS):
         _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
@@ -1484,8 +1511,12 @@ def render_screener_tab() -> None:
         with _rc[13]:
             st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_sc_clean}")
 
-        # ファンダ追加
+        # Google Finance
         with _rc[14]:
+            st.link_button("G", f"https://www.google.com/finance/quote/{_sc_clean}:TYO?hl=ja")
+
+        # ファンダ追加
+        with _rc[15]:
             if _in_list:
                 st.success("✅", icon=None)
             else:
@@ -1920,8 +1951,8 @@ def render_funda_tab() -> None:
 
     # ── テーブルヘッダー ─────────────────────────────────────────────────
     _FUNDA_LABELS = ["コード", "銘柄名", "現在価格", "前日比(%)",
-                     "かぶたん", "理論株価", "チャート", "📊EDB", "メモ", "削除"]
-    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.6, 0.6, 0.6]
+                     "かぶたん", "理論株価", "チャート", "G", "📊EDB", "メモ", "削除"]
+    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.5, 0.6, 0.6, 0.6]
     _hdr_cs = st.columns(_FUNDA_WIDTHS)
     for _hc, _lbl in zip(_hdr_cs, _FUNDA_LABELS):
         _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
@@ -1964,20 +1995,24 @@ def render_funda_tab() -> None:
         with _rc[6]:
             st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_ticker_clean}")
 
-        # EdinetDB 分析ボタン
+        # Google Finance
         with _rc[7]:
+            st.link_button("G", f"https://www.google.com/finance/quote/{_ticker_clean}:TYO?hl=ja")
+
+        # EdinetDB 分析ボタン
+        with _rc[8]:
             _edb_key = f"edb_open_{_code_raw}"
             if st.button("📊", key=f"edb_btn_{_code_raw}"):
                 st.session_state[_edb_key] = not st.session_state.get(_edb_key, False)
 
         # メモ開閉ボタン
-        with _rc[8]:
+        with _rc[9]:
             _memo_key = f"memo_open_{_code_raw}"
             if st.button("📝", key=f"memo_btn_{_code_raw}"):
                 st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
 
         # 削除ボタン
-        with _rc[9]:
+        with _rc[10]:
             if st.button("🗑️", key=f"del_funda_{_code_raw}"):
                 st.session_state.fund_df = st.session_state.fund_df[
                     st.session_state.fund_df["code"] != _code_raw
@@ -3298,15 +3333,182 @@ _EARNINGS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "earn
 _TASK_NAME      = "TurtleTool_EarningsCalendar"   # Windows タスクスケジューラ タスク名
 
 
+def _build_earnings_prompt(
+    sec_code: str,
+    company_name: str,
+    period_type: str,
+    market: str,
+    announcement_date: str,
+) -> str:
+    """
+    EdinetDB から財務データを取得し、AI決算分析用プロンプトを生成して返す。
+    Claude / ChatGPT / Gemini どれにでも貼り付け可能な形式。
+    """
+    lines: list[str] = []
+
+    # ── 1. 基本情報セクション ────────────────────────────────────────────────
+    lines += [
+        f"# 決算速報分析レポート依頼",
+        f"",
+        f"## 対象企業",
+        f"- **企業名**: {company_name}（証券コード: {sec_code}）",
+        f"- **決算種別**: {period_type}",
+        f"- **市場**: {market}",
+        f"- **発表日**: {announcement_date}",
+        f"",
+    ]
+
+    # ── 2. EdinetDB から基本財務データ取得 ──────────────────────────────────
+    _edb = edinet_get_company(sec_code)
+    _edinet_code = edinet_get_edinet_code(sec_code)
+    _earnings_list: list[dict] = []
+    if _edinet_code:
+        _er = _call_edinetdb("get_earnings", edinet_code=_edinet_code, limit=8)
+        _earnings_list = _er.get("earnings", []) if isinstance(_er, dict) else []
+
+    if "error" not in _edb:
+        # 年次財務サマリー
+        _fy    = _edb.get("latestFiscalYear", "―")
+        _rev   = _edb.get("revenue")
+        _oi    = _edb.get("operatingIncome")
+        _ni    = _edb.get("netIncome")
+        _eps   = _edb.get("eps")
+        _per   = _edb.get("per")
+        _pbr   = _edb.get("priceToBook") or _edb.get("pbr")
+        _roe   = _edb.get("roe")
+        _opm   = _edb.get("operatingMargin")
+        _eq    = _edb.get("equityRatio")
+        _dy    = _edb.get("dividendYield")
+        _hs    = _edb.get("healthScore")
+        _ev_eb = _edb.get("evEbitda")
+
+        def _m(v, fmt=".1f", unit="百万円"):
+            if v is None:
+                return "―"
+            if unit == "百万円":
+                return f"{v/1_000_000:,.0f}百万円"
+            return f"{v:{fmt}}"
+
+        lines += [
+            f"## 直近年次財務データ（FY{_fy}）",
+            f"| 指標 | 数値 |",
+            f"|------|------|",
+            f"| 売上高 | {_m(_rev)} |",
+            f"| 営業利益 | {_m(_oi)} |",
+            f"| 純利益 | {_m(_ni)} |",
+            f"| EPS | {_eps:.2f}円 |" if _eps else "| EPS | ― |",
+            f"| PER | {_per:.1f}倍 |" if _per else "| PER | ― |",
+            f"| PBR | {_pbr:.2f}倍 |" if _pbr else "| PBR | ― |",
+            f"| ROE | {_roe*100:.1f}% |" if _roe else "| ROE | ― |",
+            f"| 営業利益率 | {_opm*100:.1f}% |" if _opm else "| 営業利益率 | ― |",
+            f"| 自己資本比率 | {_eq*100:.1f}% |" if _eq else "| 自己資本比率 | ― |",
+            f"| 配当利回り | {_dy*100:.2f}% |" if _dy else "| 配当利回り | ― |",
+            f"| EV/EBITDA | {_ev_eb:.1f}倍 |" if _ev_eb else "| EV/EBITDA | ― |",
+            f"| 財務健全性スコア | {_hs}/100 |" if _hs else "| 財務健全性スコア | ― |",
+            f"",
+        ]
+
+        # 最新決算短信
+        _le = _edb.get("latestEarnings")
+        if _le:
+            _qt     = _le.get("quarter", "")
+            _qdate  = _le.get("disclosureDate", "")
+            _qrev   = _le.get("revenue")
+            _qoi    = _le.get("operatingIncome")
+            _qni    = _le.get("netIncome")
+            _qeps   = _le.get("eps")
+            _qrchg  = _le.get("revenueYoy")
+            _qoichg = _le.get("operatingIncomeYoy")
+            _qnichg = _le.get("netIncomeYoy")
+            _frev   = _le.get("forecastRevenue")
+            _foi    = _le.get("forecastOperatingIncome")
+            _fni    = _le.get("forecastNetIncome")
+            _feps   = _le.get("forecastEps")
+
+            def _pct(v):
+                return f"{v*100:+.1f}%" if v is not None else "―"
+            def _mn(v):
+                return f"{v:,}百万円" if v is not None else "―"
+
+            lines += [
+                f"## 直近決算短信（Q{_qt}、開示日: {_qdate}）",
+                f"| 項目 | 当期実績 | 前年比 |",
+                f"|------|----------|--------|",
+                f"| 売上高 | {_mn(_qrev)} | {_pct(_qrchg)} |",
+                f"| 営業利益 | {_mn(_qoi)} | {_pct(_qoichg)} |",
+                f"| 純利益 | {_mn(_qni)} | {_pct(_qnichg)} |",
+                f"| EPS | {_qeps:.2f}円 |  |" if _qeps else "| EPS | ― |  |",
+                f"",
+                f"### 通期業績予想",
+                f"| 項目 | 予想 |",
+                f"|------|------|",
+                f"| 売上高（予想） | {_mn(_frev)} |",
+                f"| 営業利益（予想） | {_mn(_foi)} |",
+                f"| 純利益（予想） | {_mn(_fni)} |",
+                f"| EPS（予想） | {_feps:.2f}円 |" if _feps else "| EPS（予想） | ― |",
+                f"",
+            ]
+
+    # ── 3. 直近8四半期 決算推移 ──────────────────────────────────────────────
+    if _earnings_list:
+        lines += [
+            f"## 直近決算推移（直近{len(_earnings_list)}件）",
+            f"| 開示日 | 種別 | 売上高(百万) | 営業利益(百万) | 純利益(百万) | EPS |",
+            f"|--------|------|-------------|--------------|------------|-----|",
+        ]
+        for _e in _earnings_list:
+            _eq2  = f"Q{_e.get('quarter','?')}"
+            _ed   = _e.get("disclosureDate", "")
+            _er2  = _e.get("revenue")
+            _eoi2 = _e.get("operatingIncome")
+            _eni  = _e.get("netIncome")
+            _eep  = _e.get("eps")
+            _c_rev = f"{_er2:,}" if _er2 is not None else "―"
+            _c_oi  = f"{_eoi2:,}" if _eoi2 is not None else "―"
+            _c_ni  = f"{_eni:,}" if _eni is not None else "―"
+            _c_ep  = f"{_eep:.2f}" if _eep is not None else "―"
+            lines.append(f"| {_ed} | {_eq2} | {_c_rev} | {_c_oi} | {_c_ni} | {_c_ep} |")
+        lines.append("")
+
+    # ── 4. 分析依頼 ──────────────────────────────────────────────────────────
+    lines += [
+        f"---",
+        f"",
+        f"## 分析依頼",
+        f"上記のデータをもとに、以下の観点からプロの株式アナリスト視点で分析してください。",
+        f"出力は **日本語・Markdown形式** でお願いします。",
+        f"",
+        f"### 1. 直近決算サマリー",
+        f"- 売上高・営業利益・純利益・EPS（前年同期比付き）",
+        f"- 会社予想との乖離（上振れ/下振れ/概ね一致）",
+        f"",
+        f"### 2. 業績トレンド",
+        f"- 売上・営業利益の推移と方向性",
+        f"  （加速↑↑ / 改善↑ / 横ばい→ / 悪化↓ / 急落↓↓）",
+        f"- 利益率の変化（改善or悪化）",
+        f"",
+        f"### 3. バリュエーション評価",
+        f"- PER・PBR・EV/EBITDAの割安/割高判定",
+        f"- 同業他社と比較した場合の水準感",
+        f"",
+        f"### 4. 注目ポイント",
+        f"- ✅ 良かった点（2〜3点）",
+        f"- ⚠️ 懸念点（2〜3点）",
+        f"",
+        f"### 5. 投資判断",
+        f"次回決算までの間：**買い継続 / 様子見 / 要注意** のいずれかを根拠付きで。",
+        f"目標株価の目安（PER基準）も示してください。",
+    ]
+
+    return "\n".join(lines)
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def _fetch_earnings_calendar(date_str: str) -> list[dict]:
     """EdinetDB から指定日の決算発表一覧を取得してリストで返す。"""
-    result = _call_edinetdb("get_earnings_calendar", date=date_str)
-    # レスポンス形式: {"companies": [...]} or {"earnings": [...]}
-    for key in ("companies", "earnings", "data"):
-        if key in result and isinstance(result[key], list):
-            return result[key]
-    return []
+    result = _call_edinetdb("get_earnings_calendar", date_from=date_str, date_to=date_str)
+    # レスポンス形式: {"calendar": [...], "count": N, ...}
+    return result.get("calendar", [])
 
 
 def _save_earnings_results(date_str: str, rows: list[dict]) -> None:
@@ -3529,9 +3731,9 @@ def render_earnings_report_tab() -> None:
                                 key="er_search", label_visibility="collapsed")
 
         # ヘッダー行
-        _hw = [0.7, 1.8, 1.2, 1.0, 0.9, 0.6]
+        _hw = [0.65, 1.7, 1.1, 0.9, 0.85, 0.45, 0.45]
         _hcols = st.columns(_hw)
-        for _hc, _hl in zip(_hcols, ["コード", "企業名", "決算種別", "市場", "開示時刻", "監視"]):
+        for _hc, _hl in zip(_hcols, ["コード", "企業名", "決算種別", "市場", "発表日", "監視", "AI"]):
             _hc.markdown(f"**{_hl}**")
         st.divider()
 
@@ -3543,9 +3745,9 @@ def render_earnings_report_tab() -> None:
             _raw_sc   = str(_r.get("secCode", ""))
             _sec_code = _raw_sc.rstrip("0") if _raw_sc.endswith("0") else _raw_sc
             _name     = _r.get("companyName") or _r.get("name") or _r.get("filerName") or "―"
-            _qtype    = _r.get("reportType") or _r.get("quarter") or _r.get("docType") or "―"
-            _market   = _r.get("market") or _r.get("exchange") or "―"
-            _dtime    = _r.get("disclosureTime") or _r.get("time") or "―"
+            _qtype    = _r.get("periodType") or _r.get("reportType") or _r.get("quarter") or "―"
+            _market   = _r.get("marketSegment") or _r.get("market") or _r.get("exchange") or "―"
+            _dtime    = _r.get("announcementDate") or _r.get("disclosureTime") or "―"
             _ticker   = f"{_sec_code}.T"
 
             # 絞り込み
@@ -3573,14 +3775,117 @@ def render_earnings_report_tab() -> None:
                     _existing_codes.add(_ticker)
                     st.rerun()
 
+            # AI分析ボタン
+            if _rc[6].button("🤖", key=f"er_ai_{_sec_code}", help="AI決算分析"):
+                st.session_state["er_ai_target"] = {
+                    "secCode":     _sec_code,
+                    "companyName": _name,
+                    "periodType":  _qtype,
+                    "market":      _market,
+                    "date":        er_rows_date,
+                }
+                st.session_state.pop("er_ai_prompt", None)   # 旧プロンプトクリア
+                st.session_state.pop("er_ai_data", None)
+
+        # ── AI決算分析パネル ──────────────────────────────────────────────
+        _ai_tgt = st.session_state.get("er_ai_target")
+        if _ai_tgt:
+            st.divider()
+            _ai_sc   = _ai_tgt["secCode"]
+            _ai_name = _ai_tgt["companyName"]
+            _ai_qt   = _ai_tgt["periodType"]
+            _ai_mkt  = _ai_tgt["market"]
+            _ai_date = _ai_tgt["date"]
+
+            st.markdown(f"### 🤖 AI決算分析　`{_ai_sc}` {_ai_name}")
+            st.caption(f"決算種別: {_ai_qt}　／　市場: {_ai_mkt}　／　発表日: {_ai_date}")
+
+            # ── データ取得 & プロンプト生成 ──────────────────────────────
+            _ai_gen_col, _ai_clr_col = st.columns([0.3, 0.7])
+            with _ai_gen_col:
+                if st.button("📥 財務データ取得してプロンプト生成",
+                             key="er_ai_gen_btn", type="primary"):
+                    with st.spinner(f"{_ai_name} の財務データを取得中..."):
+                        _ai_prompt_text = _build_earnings_prompt(
+                            _ai_sc, _ai_name, _ai_qt, _ai_mkt, _ai_date
+                        )
+                    st.session_state["er_ai_prompt"] = _ai_prompt_text
+            with _ai_clr_col:
+                if st.button("✖️ 閉じる", key="er_ai_close"):
+                    st.session_state.pop("er_ai_target", None)
+                    st.session_state.pop("er_ai_prompt", None)
+                    st.rerun()
+
+            # ── プロンプト表示 & 編集 ─────────────────────────────────────
+            if "er_ai_prompt" in st.session_state:
+                _prompt_val = st.session_state["er_ai_prompt"]
+
+                st.markdown("#### 📋 生成されたプロンプト（編集可能）")
+                _edited = st.text_area(
+                    "プロンプト",
+                    value=_prompt_val,
+                    height=320,
+                    key="er_ai_prompt_editor",
+                    label_visibility="collapsed",
+                )
+
+                # ── AI サービス選択ボタン ────────────────────────────────
+                st.markdown("**▼ 以下のAIにプロンプトをコピー＆ペーストして分析依頼してください**")
+                _ai_b1, _ai_b2, _ai_b3 = st.columns(3)
+                _ai_b1.link_button(
+                    "🟣 Claude で分析",
+                    url="https://claude.ai/new",
+                    use_container_width=True,
+                )
+                _ai_b2.link_button(
+                    "🟢 ChatGPT で分析",
+                    url="https://chatgpt.com/",
+                    use_container_width=True,
+                )
+                _ai_b3.link_button(
+                    "🔵 Gemini で分析",
+                    url="https://gemini.google.com/",
+                    use_container_width=True,
+                )
+
+                # ── プロンプト コードブロック（コピー用） ───────────────
+                with st.expander("📄 プロンプト（コピー用コードブロック）", expanded=False):
+                    st.code(_edited, language="markdown")
+
+                # ── 分析結果の保存 ────────────────────────────────────────
+                st.markdown("#### 💾 分析結果を保存")
+                st.caption("AIから返ってきたMarkdown結果をここに貼り付けて保存します。")
+                _result_input = st.text_area(
+                    "AIの分析結果（Markdown）",
+                    height=200,
+                    placeholder="AIチャットから分析結果をここに貼り付けてください...",
+                    key="er_ai_result_input",
+                    label_visibility="collapsed",
+                )
+                import datetime as _dt2
+                _today_str2 = _dt2.date.today().strftime("%Y%m%d")
+                _default_fname = f"{_ai_sc}_earnings_{_today_str2}.md"
+                _save_fname = st.text_input(
+                    "保存ファイル名",
+                    value=_default_fname,
+                    key="er_ai_save_fname",
+                )
+                if st.button("💾 analysis_results/ に保存", key="er_ai_save_btn",
+                             disabled=not _result_input.strip()):
+                    os.makedirs(_ANALYSIS_RESULTS_DIR, exist_ok=True)
+                    _save_path = os.path.join(_ANALYSIS_RESULTS_DIR, _save_fname)
+                    with open(_save_path, "w", encoding="utf-8") as _sf:
+                        _sf.write(_result_input)
+                    st.success(f"保存しました: `{_save_path}`")
+
         # CSV ダウンロード
         st.divider()
         _csv_df = pd.DataFrame([{
             "secCode":    str(_r.get("secCode", "")).rstrip("0"),
             "企業名":     _r.get("companyName") or _r.get("name") or "",
-            "決算種別":   _r.get("reportType") or _r.get("quarter") or "",
-            "市場":       _r.get("market") or "",
-            "開示時刻":   _r.get("disclosureTime") or "",
+            "決算種別":   _r.get("periodType") or _r.get("reportType") or "",
+            "市場":       _r.get("marketSegment") or _r.get("market") or "",
+            "発表日":     _r.get("announcementDate") or "",
         } for _r in er_rows])
         st.download_button(
             "📥 CSVダウンロード",
@@ -3594,59 +3899,117 @@ def render_earnings_report_tab() -> None:
         pass   # すでに上でメッセージ表示済み
 
     # ════════════════════════════════════════════════════════════════════════
-    # ③ 自動取得スケジュール（Windows タスクスケジューラ）
+    # ③ 保存データ横断検索（銘柄コード / 企業名）
+    # ════════════════════════════════════════════════════════════════════════
+    st.divider()
+    st.markdown("### 🔎 保存データから銘柄を検索")
+    st.caption("earnings_results.json に保存済みの全日付から、銘柄コードまたは企業名で検索します。")
+
+    _xsearch = st.text_input(
+        "銘柄コードまたは企業名",
+        placeholder="例: 7203 または トヨタ",
+        key="er_xsearch",
+        label_visibility="collapsed",
+    )
+
+    if _xsearch:
+        try:
+            with open(_EARNINGS_FILE, encoding="utf-8") as _xf:
+                _all_data: dict = json.load(_xf)
+        except Exception:
+            _all_data = {}
+
+        _xresults: list[tuple[str, dict]] = []  # (date_str, record)
+        for _xdate, _xrows in sorted(_all_data.items(), reverse=True):
+            for _xr in _xrows:
+                _xsc   = str(_xr.get("secCode", "")).rstrip("0")
+                _xname = _xr.get("companyName") or _xr.get("name") or ""
+                if _xsearch in _xsc or _xsearch.lower() in _xname.lower():
+                    _xresults.append((_xdate, _xr))
+
+        if _xresults:
+            st.markdown(f"**{len(_xresults)} 件** 見つかりました")
+            _xhw = [0.7, 1.8, 1.2, 1.0, 0.8]
+            _xhcols = st.columns(_xhw)
+            for _xhc, _xhl in zip(_xhcols, ["発表日", "企業名", "決算種別", "市場", "コード"]):
+                _xhc.markdown(f"**{_xhl}**")
+            st.divider()
+            for _xdate, _xr in _xresults:
+                _xsc2  = str(_xr.get("secCode", "")).rstrip("0")
+                _xname2 = _xr.get("companyName") or _xr.get("name") or "―"
+                _xqt   = _xr.get("periodType") or _xr.get("reportType") or "―"
+                _xmkt  = _xr.get("marketSegment") or _xr.get("market") or "―"
+                _xrc   = st.columns(_xhw)
+                _xrc[0].write(_xdate)
+                _xrc[1].write(_xname2)
+                _xrc[2].write(str(_xqt))
+                _xrc[3].write(str(_xmkt))
+                _xrc[4].markdown(f"`{_xsc2}`")
+        else:
+            st.info(f"「{_xsearch}」に一致するデータが保存データ内に見つかりませんでした。")
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ④ 自動取得スケジュール（Windows タスクスケジューラ）
     # ════════════════════════════════════════════════════════════════════════
     st.divider()
     st.markdown("### ⏰ 自動取得スケジュール")
 
-    _status = _task_status()
-    _status_map = {
-        "ready":    ("🟢 登録済み（待機中）", "success"),
-        "running":  ("🔵 実行中",             "info"),
-        "disabled": ("🟡 無効",               "warning"),
-        "none":     ("⚫ 未登録",              ""),
-        "error":    ("🔴 確認エラー",          "error"),
-    }
-    _status_label, _status_type = _status_map.get(_status, (f"❓ {_status}", ""))
-    st.markdown(f"**現在の状態：** {_status_label}")
+    if not _IS_WINDOWS:
+        st.info(
+            "⚠️ **この機能はWindowsローカル版専用です。**\n\n"
+            "Streamlit Cloud（スマホ・クラウド）では自動スケジュール登録はできません。\n"
+            "決算カレンダーは「📥 取得」ボタンから手動で取得してください。",
+            icon="🖥️",
+        )
+    else:
+        _status = _task_status()
+        _status_map = {
+            "ready":    ("🟢 登録済み（待機中）", "success"),
+            "running":  ("🔵 実行中",             "info"),
+            "disabled": ("🟡 無効",               "warning"),
+            "none":     ("⚫ 未登録",              ""),
+            "error":    ("🔴 確認エラー",          "error"),
+        }
+        _status_label, _status_type = _status_map.get(_status, (f"❓ {_status}", ""))
+        st.markdown(f"**現在の状態：** {_status_label}")
 
-    _sa1, _sa2, _sa3, _sa4 = st.columns([0.3, 0.2, 0.2, 0.3])
-    with _sa1:
-        _reg_h = st.number_input("実行時刻（時）", min_value=0, max_value=23, value=20,
-                                  key="er_task_hour", label_visibility="visible")
-        _reg_m = st.number_input("実行時刻（分）", min_value=0, max_value=59, value=0,
-                                  step=5, key="er_task_min", label_visibility="visible")
-    with _sa2:
-        st.write("")
-        st.write("")
-        if st.button("📝 登録 / 更新", key="er_task_reg", use_container_width=True,
-                     type="primary"):
-            _ok, _msg = _task_register(int(_reg_h), int(_reg_m))
-            (st.success if _ok else st.error)(f"{_msg}")
-            st.rerun()
-    with _sa3:
-        st.write("")
-        st.write("")
-        if st.button("🗑️ 削除", key="er_task_del", use_container_width=True,
-                     disabled=(_status == "none")):
-            _ok, _msg = _task_delete()
-            (st.success if _ok else st.error)(f"{_msg}")
-            st.rerun()
-    with _sa4:
-        st.write("")
-        st.write("")
-        if st.button("▶️ 今すぐ実行", key="er_task_now", use_container_width=True,
-                     disabled=(_status not in ("ready", "disabled"))):
-            _ok, _msg = _task_run_now()
-            (st.success if _ok else st.error)(f"{_msg}")
-        if st.button("🔄 状態を更新", key="er_task_refresh", use_container_width=True):
-            st.rerun()
+        _sa1, _sa2, _sa3, _sa4 = st.columns([0.3, 0.2, 0.2, 0.3])
+        with _sa1:
+            _reg_h = st.number_input("実行時刻（時）", min_value=0, max_value=23, value=20,
+                                      key="er_task_hour", label_visibility="visible")
+            _reg_m = st.number_input("実行時刻（分）", min_value=0, max_value=59, value=0,
+                                      step=5, key="er_task_min", label_visibility="visible")
+        with _sa2:
+            st.write("")
+            st.write("")
+            if st.button("📝 登録 / 更新", key="er_task_reg", use_container_width=True,
+                         type="primary"):
+                _ok, _msg = _task_register(int(_reg_h), int(_reg_m))
+                (st.success if _ok else st.error)(f"{_msg}")
+                st.rerun()
+        with _sa3:
+            st.write("")
+            st.write("")
+            if st.button("🗑️ 削除", key="er_task_del", use_container_width=True,
+                         disabled=(_status == "none")):
+                _ok, _msg = _task_delete()
+                (st.success if _ok else st.error)(f"{_msg}")
+                st.rerun()
+        with _sa4:
+            st.write("")
+            st.write("")
+            if st.button("▶️ 今すぐ実行", key="er_task_now", use_container_width=True,
+                         disabled=(_status not in ("ready", "disabled"))):
+                _ok, _msg = _task_run_now()
+                (st.success if _ok else st.error)(f"{_msg}")
+            if st.button("🔄 状態を更新", key="er_task_refresh", use_container_width=True):
+                st.rerun()
 
-    st.caption(
-        f"タスク名: `{_TASK_NAME}`　　"
-        "毎日指定時刻に決算カレンダーを取得して `earnings_results.json` に保存します。"
-        "（スクリプト: `daily_earnings_report.bat`）"
-    )
+        st.caption(
+            f"タスク名: `{_TASK_NAME}`　　"
+            "毎日指定時刻に決算カレンダーを取得して `earnings_results.json` に保存します。"
+            "（スクリプト: `daily_earnings_report.bat`）"
+        )
 
     # ════════════════════════════════════════════════════════════════════════
     # ④ 保存済みデータ一覧
