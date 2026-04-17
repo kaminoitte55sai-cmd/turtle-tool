@@ -2808,6 +2808,61 @@ def load_memo_data() -> dict:
 
 
 # ===========================================================================
+# ファンダ分析タブ ヘルパー
+# ===========================================================================
+
+def _add_ticker_to_pos_list(ticker: str, target_list_id: int) -> str:
+    """
+    ticker（例: "7203.T"）を指定ポジションリストへ追加する。
+    アクティブリストなら session_state.df を直接更新し save_state() する。
+    非アクティブリストなら JSON を読み書きして保存する。
+    戻り値: 成功メッセージ文字列（エラー時は "ERROR: ..." 形式）
+    """
+    active = st.session_state.get("active_list", 1)
+    list_names = st.session_state.get("list_names", {})
+    list_name = list_names.get(target_list_id, f"リスト{target_list_id}")
+
+    if target_list_id == active:
+        # ── アクティブリストへ追加（session_state.df を直接操作） ──────────
+        n = st.session_state.n_rows
+        target_idx = next(
+            (i for i in range(n) if not st.session_state.df.at[i, "銘柄コード"]),
+            None,
+        )
+        if target_idx is None:
+            add_row()
+            target_idx = st.session_state.n_rows - 1
+        st.session_state.df.at[target_idx, "銘柄コード"] = ticker
+        st.session_state.prev_tickers[target_idx] = "__FORCE_FETCH__"
+        save_state(active)
+    else:
+        # ── 非アクティブリストへ追加（JSON を直接読み書き） ─────────────
+        saved = load_state(target_list_id) or {}
+        records: list[dict] = saved.get("df_records", [])
+        n_rows: int = saved.get("n_rows", INITIAL_ROWS)
+
+        # 空きスロットを探す
+        empty_idx = next(
+            (i for i, r in enumerate(records) if not r.get("銘柄コード")),
+            None,
+        )
+        if empty_idx is not None:
+            records[empty_idx]["銘柄コード"] = ticker
+        else:
+            new_row = empty_row()
+            new_row["銘柄コード"] = ticker
+            records.append(new_row)
+            n_rows = len(records)
+
+        saved["df_records"] = records
+        saved["n_rows"] = n_rows
+        with open(_list_save_file(target_list_id), "w", encoding="utf-8") as _fp:
+            json.dump(saved, _fp, ensure_ascii=False)
+
+    return f"✅ {ticker} を **{list_name}** に追加しました"
+
+
+# ===========================================================================
 # ファンダ分析タブ
 # ===========================================================================
 
@@ -2927,8 +2982,8 @@ def render_funda_tab() -> None:
 
     # ── テーブルヘッダー ─────────────────────────────────────────────────
     _FUNDA_LABELS = ["コード", "銘柄名", "現在価格", "前日比(%)",
-                     "かぶたん", "理論株価", "チャート", "G", "X", "Yahoo", "メモ", "削除"]
-    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.5, 0.5, 0.6, 0.6, 0.6]
+                     "かぶたん", "理論株価", "チャート", "G", "X", "Yahoo", "📌", "メモ", "削除"]
+    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.5, 0.5, 0.6, 0.5, 0.6, 0.5]
     _hdr_cs = st.columns(_FUNDA_WIDTHS)
     for _hc, _lbl in zip(_hdr_cs, _FUNDA_LABELS):
         _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
@@ -2985,14 +3040,20 @@ def render_funda_tab() -> None:
         with _rc[9]:
             st.link_button("Yahoo", f"https://finance.yahoo.co.jp/quote/{_ticker_clean}")
 
-        # メモ開閉ボタン
+        # ポジションリストへ追加ボタン
         with _rc[10]:
+            _pos_key = f"pos_panel_{_code_raw}"
+            if st.button("📌", key=f"pos_btn_{_code_raw}", help="ポジション管理リストへ追加"):
+                st.session_state[_pos_key] = not st.session_state.get(_pos_key, False)
+
+        # メモ開閉ボタン
+        with _rc[11]:
             _memo_key = f"memo_open_{_code_raw}"
             if st.button("📝", key=f"memo_btn_{_code_raw}"):
                 st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
 
         # 削除ボタン
-        with _rc[11]:
+        with _rc[12]:
             if st.button("🗑️", key=f"del_funda_{_code_raw}"):
                 st.session_state.fund_df = st.session_state.fund_df[
                     st.session_state.fund_df["code"] != _code_raw
@@ -3004,6 +3065,26 @@ def render_funda_tab() -> None:
                     del st.session_state.funda_memos[_code_raw]
                     save_memo_data(st.session_state.funda_memos)
                 st.rerun()
+
+        # ── ポジションリスト選択パネル ────────────────────────────────────────
+        if st.session_state.get(f"pos_panel_{_code_raw}", False):
+            with st.container(border=True):
+                st.markdown(f"**📌 {_jp_name}（{_ticker_clean}）をポジション管理リストへ追加**")
+                _list_names = st.session_state.get("list_names", {})
+                _active = st.session_state.get("active_list", 1)
+                _btn_cols = st.columns(NUM_POS_LISTS)
+                for _lid in range(1, NUM_POS_LISTS + 1):
+                    _lname = _list_names.get(_lid, f"リスト{_lid}")
+                    _label = f"{'▶ ' if _lid == _active else ''}{_lname}"
+                    with _btn_cols[_lid - 1]:
+                        if st.button(_label, key=f"pos_add_{_code_raw}_{_lid}",
+                                     use_container_width=True):
+                            # _ticker_clean は ".T" なし → normalize して渡す
+                            _msg = _add_ticker_to_pos_list(
+                                normalize_ticker(_ticker_clean), _lid)
+                            st.session_state[f"pos_panel_{_code_raw}"] = False
+                            st.toast(_msg)
+                            st.rerun()
 
         # ── メモ展開エリア ──────────────────────────────────────────────────
         if st.session_state.get(f"memo_open_{_code_raw}", False):
