@@ -243,14 +243,22 @@ def _load_list_into_state(list_id: int) -> None:
     """指定リストのデータを session_state に読み込む（リスト切替・初期化で使用）。"""
     saved = load_state(list_id)
     if saved:
-        n = saved.get("n_rows", INITIAL_ROWS)
+        st.session_state.df           = records_to_df(saved["df_records"])
+        # n_rows は df の実際の行数に合わせる（JSON の値とズレる場合があるため）
+        n = len(st.session_state.df)
         st.session_state.n_rows       = n
         st.session_state.capital      = saved.get("capital", 1_000_000)
         st.session_state.losscut_mult = saved.get("losscut_mult", 2.0)
         st.session_state.risk_pct     = saved.get("risk_pct", 0.01)
-        st.session_state.prev_tickers = saved.get("prev_tickers", [""] * n)
-        st.session_state.fx_rates     = saved.get("fx_rates", [1.0] * n)
-        st.session_state.df           = records_to_df(saved["df_records"])
+        _pt = saved.get("prev_tickers", [])
+        _fx = saved.get("fx_rates", [])
+        # prev_tickers / fx_rates の長さを df 行数に揃える
+        while len(_pt) < n: _pt.append("")
+        while len(_pt) > n: _pt.pop()
+        while len(_fx) < n: _fx.append(1.0)
+        while len(_fx) > n: _fx.pop()
+        st.session_state.prev_tickers = _pt
+        st.session_state.fx_rates     = _fx
         # 保存されたリスト名を反映
         _saved_name = saved.get("name")
         if _saved_name:
@@ -1126,6 +1134,7 @@ def render_position_tab() -> None:
     with col_tbl:
         edited = st.data_editor(
             st.session_state.df,
+            key=f"pos_df_{_active}",
             column_config={
                 "銘柄コード":     st.column_config.TextColumn("銘柄コード",     width="small"),
                 "銘柄名":         st.column_config.TextColumn("銘柄名",         width="medium"),
