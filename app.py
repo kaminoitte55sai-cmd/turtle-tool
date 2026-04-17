@@ -1283,13 +1283,9 @@ def render_position_tab() -> None:
                         continue
 
                     # 正常系
-                    _div      = _res.get("divergence_pct")
-                    _theory   = _res.get("theoretical_price")
-                    _cur      = _res.get("_price") or _price or 0
-                    _eps_lbl  = (
-                        f"{_res['use_eps']:.1f}({'予' if _res.get('is_forecast_eps') else '実'})"
-                        if _res.get("use_eps") else "―"
-                    )
+                    _div    = _res.get("divergence_pct")
+                    _theory = _res.get("theoretical_price")
+                    _cur    = _res.get("_price") or _price or 0
                     try:
                         _div_f     = float(_div) if _div is not None else None
                         _div_color = "#16a34a" if (_div_f is not None and _div_f >= 0) else "#dc2626"
@@ -1299,6 +1295,7 @@ def render_position_tab() -> None:
                         _div_color, _div_txt = "#888", "―"
 
                     with st.container(border=True):
+                        # ── ヘッダー行：銘柄名 / 理論株価 / 乖離率 ────────
                         _hc1, _hc2, _hc3 = st.columns([0.35, 0.28, 0.37])
                         _hc1.markdown(
                             f"**{_name}**  "
@@ -1311,23 +1308,101 @@ def render_position_tab() -> None:
                             unsafe_allow_html=True,
                         )
                         _hc3.markdown(
-                            f"<span style='color:{_div_color};font-size:1.05em;font-weight:600;'>"
-                            f"{_div_txt}</span>　"
-                            f"<span style='color:#666;font-size:0.82em'>現在値 ¥{_cur:,.0f}</span>",
+                            f"<span style='color:{_div_color};font-size:1.05em;"
+                            f"font-weight:600;'>{_div_txt}</span>　"
+                            f"<span style='color:#666;font-size:0.82em'>"
+                            f"現在値 ¥{_cur:,.0f}</span>",
                             unsafe_allow_html=True,
                         )
-                        _dc1, _dc2, _dc3, _dc4, _dc5 = st.columns(5)
-                        _dc1.metric("資産価値",      f"¥{_res.get('asset_value',0):,.0f}")
-                        _dc2.metric("事業価値",      f"¥{_res.get('business_value',0):,.0f}")
-                        _dc3.metric("市場リスク補正", f"−{_res.get('risk_rate',0)*100:.0f}%")
-                        _dc4.metric("BPS / PBR",
-                                    f"¥{_res.get('bps',0):,.0f} / {_res.get('pbr',0):.2f}x")
-                        _dc5.metric("自己資本比率",   f"{_res.get('equity_ratio_pct',0):.1f}%")
+
+                        # ── ① 資産価値の算出過程 ─────────────────────────
+                        st.markdown(
+                            "<div style='font-size:0.78em;color:#555;"
+                            "font-weight:600;margin-top:6px;'>① 資産価値</div>",
+                            unsafe_allow_html=True,
+                        )
+                        _av1, _av2, _av3 = st.columns(3)
+                        _av1.metric(
+                            "BPS（1株純資産）",
+                            f"¥{_res.get('bps',0):,.0f}",
+                            help=f"取得元: {_res.get('bps_src','')}",
+                        )
+                        _av2.metric(
+                            f"割引評価率（自己資本比率 {_res.get('equity_ratio_pct',0):.1f}%）",
+                            f"×{_res.get('discount_rate',0)*100:.0f}%",
+                        )
+                        _av3.metric(
+                            "資産価値",
+                            f"¥{_res.get('asset_value',0):,.0f}",
+                        )
+
+                        # ── ② 事業価値の算出過程 ─────────────────────────
+                        st.markdown(
+                            "<div style='font-size:0.78em;color:#555;"
+                            "font-weight:600;margin-top:4px;'>② 事業価値</div>",
+                            unsafe_allow_html=True,
+                        )
+                        _bv1, _bv2, _bv3, _bv4 = st.columns(4)
+                        _bv1.metric(
+                            f"ROA（上限30%→{_res.get('roa_cap_pct',0):.1f}%）×10",
+                            f"= {_res.get('roa_factor',0):.2f}",
+                            help=f"ROA算出: {_res.get('roa_src','')}",
+                        )
+                        _bv2.metric(
+                            "財務レバレッジ補正",
+                            f"×{_res.get('lev_corr',1):.3f}",
+                            help=(
+                                f"1÷min(1.0, max(0.66, {_res.get('equity_ratio_pct',0)/100:.2f}+0.33))"
+                                f" = 1÷{_res.get('lev_denom',1):.3f}"
+                            ),
+                        )
+                        _bv3.metric(
+                            "理論PER",
+                            f"{_res.get('riron_per',0):.1f}倍",
+                            help=f"15 × {_res.get('roa_factor',0):.2f} × {_res.get('lev_corr',1):.3f}",
+                        )
+                        _bv4.metric(
+                            "PER計算用EPS",
+                            f"¥{_res.get('per_eps',0):.2f}",
+                            help=_res.get("per_eps_src", ""),
+                        )
                         st.caption(
-                            f"ROA: {_res.get('roa_pct',0):.1f}%　"
-                            f"財務レバレッジ: {_res.get('leverage',0):.2f}x "
-                            f"(×{_res.get('lev_corr',1):.2f}補正)　"
-                            f"使用EPS: ¥{_eps_lbl}"
+                            f"　事業価値 = 理論PER {_res.get('riron_per',0):.1f}倍"
+                            f" × EPS ¥{_res.get('per_eps',0):.2f}"
+                            f" = **¥{_res.get('business_value',0):,.0f}**　　"
+                            f"({_res.get('per_eps_src','')})"
+                        )
+
+                        # ── ③ 市場リスク判定 ──────────────────────────────
+                        st.markdown(
+                            "<div style='font-size:0.78em;color:#555;"
+                            "font-weight:600;margin-top:4px;'>③ 市場リスク（リーマンショックルール）</div>",
+                            unsafe_allow_html=True,
+                        )
+                        _mr1, _mr2, _mr3 = st.columns(3)
+                        _pbr_v = _res.get('pbr', 0)
+                        _rr    = _res.get('risk_rate', 0)
+                        _mr1.metric("現在PBR", f"{_pbr_v:.2f}倍")
+                        _mr2.metric(
+                            "リスク減額率",
+                            f"−{_rr*100:.0f}%" if _rr > 0 else "0%（適用なし）",
+                        )
+                        _mr3.metric(
+                            "市場リスク減額",
+                            f"¥{_res.get('market_risk',0):,.0f}",
+                        )
+
+                        # ── ④ 理論株価 ───────────────────────────────────
+                        _base = _res.get('asset_value',0) + _res.get('business_value',0)
+                        st.markdown(
+                            f"<div style='margin-top:6px;padding:6px 10px;"
+                            f"background:#f0f9ff;border-radius:6px;font-size:0.85em;'>"
+                            f"④ 理論株価 = 資産価値 <b>¥{_res.get('asset_value',0):,.0f}</b>"
+                            f" ＋ 事業価値 <b>¥{_res.get('business_value',0):,.0f}</b>"
+                            f" − 市場リスク <b>¥{_res.get('market_risk',0):,.0f}</b>"
+                            f" = <b style='font-size:1.15em;color:#0066cc;'>¥{_theory:,.0f}</b>"
+                            f"</div>",
+                            unsafe_allow_html=True,
                         )
             elif not (_do_calc or _do_recalc):
                 st.info("「▶ 計算する」を押すと EdinetDB から財務データを取得して理論株価を算出します。")
@@ -2060,70 +2135,157 @@ def edinet_get_shareholders(sec_code: str) -> dict:
     return _call_edinetdb("get_shareholders", edinet_code=edinet_code)
 
 
+@st.cache_data(ttl=86400, show_spinner=False)   # 1日キャッシュ
+def edinet_get_financials(sec_code: str) -> dict:
+    """証券コード(4桁) → EdinetDB get_financials 最新年度データを返す（単位:円）。"""
+    edinet_code = edinet_get_edinet_code(sec_code)
+    if not edinet_code:
+        return {}
+    result = _call_edinetdb("get_financials", edinet_code=edinet_code, years=1)
+    if "error" in result:
+        return {}
+    # レスポンスは {"financials": [...]} または直接リストの場合がある
+    items = result.get("financials", [])
+    if not items and isinstance(result, list):
+        items = result
+    if items:
+        return items[0]     # 最新年度
+    # フラットな dict として返る場合もある
+    return result if result.get("fiscalYear") else {}
+
+
+@st.cache_data(ttl=3600, show_spinner=False)    # 1時間キャッシュ
+def edinet_get_latest_earnings(sec_code: str) -> dict:
+    """証券コード(4桁) → 予想経常利益を含む直近の決算短信データを返す（単位:百万円）。"""
+    edinet_code = edinet_get_edinet_code(sec_code)
+    if not edinet_code:
+        return {}
+    result = _call_edinetdb("get_earnings", edinet_code=edinet_code, limit=4)
+    earnings = result.get("earnings", []) if isinstance(result, dict) else []
+    # forecastOrdinaryIncome を含む最新エントリを優先
+    for e in earnings:
+        if e.get("forecastOrdinaryIncome") is not None:
+            return e
+    return earnings[0] if earnings else {}
+
+
 # ---------------------------------------------------------------------------
 # 理論株価計算
 # ---------------------------------------------------------------------------
 def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
     """
-    EdinetDB のデータと現在株価から理論株価を算出する。
+    EdinetDB の財務データから理論株価を算出する。
 
-    理論株価 = (資産価値 + 事業価値) − 市場リスク
+    理論株価 ＝ (資産価値 ＋ 事業価値) － 市場リスク
 
-    ▸ 資産価値  = BPS × 自己資本比率別割引評価率
-    ▸ 事業価値  = 予想EPS × 15 × ROA(上限30%)×10 × 財務レバレッジ補正
+    ▸ 資産価値  = BPS × 割引評価率（自己資本比率に応じた段階）
+    ▸ 事業価値  = 理論PER × PER計算用EPS
+       理論PER         = 15 × (ROA上限30%)×10 × 財務レバレッジ補正
+       PER計算用EPS    = 予想経常利益 × 0.7 ÷ 発行済株式数
+       財務レバレッジ補正 = 1 ÷ min(1.0, max(0.66, 自己資本比率+0.33))
     ▸ 市場リスク = (資産価値+事業価値) × リーマンショックルール補正率
-                   (PBR ≥ 0.5 なら補正なし)
+                   PBR ≥ 0.5 なら 0%（減額なし）
 
-    PBR フォールバック:
-      EdinetDB が priceToBook/pbr を返さない場合、
-      BPS = EPS ÷ ROE（ROEの定義: ROE = EPS/BPS）から導出し、
-      PBR = 現在株価 ÷ BPS として算出する。
+    データソース優先順位:
+      BPS         : get_financials.bps → 現在値÷PBR → EPS÷ROE
+      ROA         : get_financials.(netIncome÷totalAssets) → ROE×自己資本比率
+      予想経常利益 : get_earnings.forecastOrdinaryIncome → forecastNetIncome÷0.7
+      発行済株式数 : get_earnings.sharesOutstanding → get_financials.sharesIssued
+      自己資本比率 : get_financials.equityRatioOfficial → get_earnings.equityRatio
+      PBR         : get_financials.pbr → get_company.priceToBook/pbr
     """
-    edb = edinet_get_company(sec_code)
+    # ── データ取得 ─────────────────────────────────────────────────────────
+    edb  = edinet_get_company(sec_code)
     if "error" in edb:
         return {"error": edb["error"]}
+    fin  = edinet_get_financials(sec_code)        # 財務諸表（年次、単位:円）
+    earn = edinet_get_latest_earnings(sec_code)   # 最新決算短信（単位:百万円）
 
-    # ── 基礎データ抽出 ─────────────────────────────────────────────────────
-    equity_ratio = edb.get("equityRatio")            # 自己資本比率（小数）
-    roe          = edb.get("roe")                    # ROE（小数）
-    eps          = edb.get("eps")                    # 実績EPS（円）
-    per          = edb.get("per")                    # PER（倍）
-    pbr          = edb.get("priceToBook") or edb.get("pbr")  # PBR（倍）
-    le           = edb.get("latestEarnings") or {}
-    forecast_eps = le.get("forecastEps")             # 予想EPS（円）
+    # ── 1株純資産（BPS）──────────────────────────────────────────────────
+    bps     = fin.get("bps")
+    bps_src = "get_financials.bps"
+    if not bps or bps <= 0:
+        pbr_v = fin.get("pbr") or edb.get("priceToBook") or edb.get("pbr")
+        if pbr_v and pbr_v > 0 and current_price > 0:
+            bps     = current_price / pbr_v
+            bps_src = "現在株価÷PBR（推定）"
+        else:
+            eps_v = edb.get("eps")
+            roe_v = fin.get("roeOfficial") or edb.get("roe")
+            if eps_v and roe_v and roe_v > 0:
+                bps     = eps_v / roe_v
+                bps_src = "EPS÷ROE（推定）"
 
-    # ── BPS / PBR の導出（API から取れない場合のフォールバック）────────────
-    # ROEの定義: ROE = EPS / BPS  →  BPS = EPS / ROE
-    bps = None
-    bps_source = "price/PBR"
-    if pbr and pbr > 0 and current_price > 0:
-        bps = current_price / pbr
-    elif eps and roe and roe > 0:
-        # BPS = 実績EPS ÷ ROE で近似
-        bps = eps / roe
-        pbr = current_price / bps if (bps and bps > 0) else None
-        bps_source = "EPS/ROE（推定）"
+    # ── 自己資本比率（小数）───────────────────────────────────────────────
+    equity_ratio = fin.get("equityRatioOfficial")
+    eq_src = "get_financials"
+    if equity_ratio is None:
+        eq_raw = earn.get("equityRatio")
+        if eq_raw is not None:
+            equity_ratio = eq_raw / 100 if eq_raw > 1 else eq_raw
+            eq_src = "get_earnings"
+        else:
+            equity_ratio = edb.get("equityRatio")
+            eq_src = "get_company"
+
+    # ── ROA（総資産利益率）────────────────────────────────────────────────
+    roa     = None
+    roa_src = ""
+    ni_fin  = fin.get("netIncome")
+    ta_fin  = fin.get("totalAssets")
+    if ni_fin and ta_fin and ta_fin > 0:
+        roa     = ni_fin / ta_fin
+        roa_src = f"純利益({ni_fin/1e8:.1f}億)÷総資産({ta_fin/1e8:.1f}億)"
+    else:
+        roe_v = fin.get("roeOfficial") or edb.get("roe")
+        if roe_v and equity_ratio and equity_ratio > 0:
+            roa     = roe_v * equity_ratio
+            roa_src = "ROE×自己資本比率（推定）"
+
+    # ── PER計算用EPS = 予想経常利益×0.7÷発行済株式数 ────────────────────
+    forecast_oi = earn.get("forecastOrdinaryIncome")  # 百万円
+    shares      = earn.get("sharesOutstanding") or fin.get("sharesIssued")  # 株数
+
+    per_eps     = None
+    per_eps_src = ""
+    if forecast_oi is not None and shares and shares > 0:
+        # 予想経常利益は百万円単位なので ×1,000,000 で円換算
+        per_eps     = forecast_oi * 1_000_000 * 0.7 / shares
+        per_eps_src = (
+            f"予想経常利益 {forecast_oi:,}百万円×0.7"
+            f"÷発行済株式数 {shares:,}株"
+        )
+    else:
+        # フォールバック: forecastNetIncome÷0.7÷shares → forecastEps → 実績EPS
+        fni = earn.get("forecastNetIncome")
+        if fni and shares and shares > 0:
+            per_eps     = fni * 1_000_000 / shares
+            per_eps_src = f"予想純利益 {fni:,}百万円÷株式数（経常利益代用）"
+        elif earn.get("forecastEps"):
+            per_eps     = earn["forecastEps"]
+            per_eps_src = "予想EPS（直接取得）"
+        elif edb.get("eps"):
+            per_eps     = edb["eps"]
+            per_eps_src = "実績EPS（フォールバック）"
+
+    # ── PBR（市場リスク判定用）────────────────────────────────────────────
+    pbr = fin.get("pbr") or edb.get("priceToBook") or edb.get("pbr")
+    if not pbr and bps and bps > 0 and current_price > 0:
+        pbr = current_price / bps
 
     # ── バリデーション ─────────────────────────────────────────────────────
     missing = []
-    if equity_ratio is None or equity_ratio <= 0:
-        missing.append("自己資本比率(equityRatio)")
-    if bps is None or bps <= 0:
-        missing.append("BPS/PBR（priceToBook・pbr・roeのいずれも取得不可）")
-    if pbr is None or pbr <= 0:
-        missing.append("PBR")
-    if not (forecast_eps or eps):
-        missing.append("EPS")
+    if bps is None or bps <= 0:            missing.append("BPS")
+    if equity_ratio is None or equity_ratio <= 0: missing.append("自己資本比率")
+    if roa is None:                        missing.append("ROA")
+    if per_eps is None:                    missing.append("PER計算用EPS")
+    if pbr is None or pbr <= 0:            missing.append("PBR")
     if missing:
         return {"error": f"データ不足: {', '.join(missing)}"}
 
-    # ── 使用EPS (予想優先、なければ実績) ──────────────────────────────────
-    use_eps = forecast_eps if forecast_eps else eps
-    is_forecast = forecast_eps is not None
-
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
     # 1. 資産価値 = BPS × 割引評価率
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
     eq_pct = equity_ratio * 100
     if eq_pct >= 80:
         discount = 0.80
@@ -2139,28 +2301,28 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
         discount = 0.50
     asset_value = bps * discount
 
-    # ────────────────────────────────────────────────────────────────────────
-    # 2. 事業価値 = EPS × 15 × ROA(上限30%)×10 × 財務レバレッジ補正
-    #    ROA ≈ ROE × 自己資本比率  （総資産利益率の近似）
-    # ────────────────────────────────────────────────────────────────────────
-    roa_raw   = (roe * equity_ratio) if roe else 0.0
-    roa_cap   = min(roa_raw, 0.30)      # 上限 30%
-    roa_factor = roa_cap * 10           # ×10 正規化（ROA=10% → factor=1.0）
+    # ════════════════════════════════════════════════════════════════════════
+    # 2. 事業価値 = 理論PER × PER計算用EPS
+    #
+    #   理論PER = 15 × (ROA上限30%)×10 × 財務レバレッジ補正
+    #   財務レバレッジ補正 = 1 ÷ min(1.0, max(0.66, 自己資本比率+0.33))
+    #     目安: 自己資本比率67%以上(lev≤1.5) → 1.0倍
+    #           自己資本比率33%〜67%(lev 1.5〜3) → 1.0〜1.5倍
+    #           自己資本比率33%未満(lev>3)       → 1.515倍
+    # ════════════════════════════════════════════════════════════════════════
+    roa_cap    = min(roa, 0.30)                               # ROA上限 30%
+    roa_factor = roa_cap * 10                                 # ×10正規化
 
-    leverage = 1.0 / equity_ratio       # 財務レバレッジ = 総資産/純資産
-    if leverage <= 1.5:
-        lev_corr = 1.0
-    elif leverage <= 3.0:
-        lev_corr = 1.0 + (leverage - 1.5) / 1.5 * 0.5  # 1.0〜1.5 線形補間
-    else:
-        lev_corr = 1.5
+    lev_denom  = min(1.0, max(0.66, equity_ratio + 0.33))    # 補正分母
+    lev_corr   = 1.0 / lev_denom                             # 財務レバレッジ補正
 
-    business_value = use_eps * 15 * roa_factor * lev_corr
+    riron_per      = 15.0 * roa_factor * lev_corr            # 理論PER
+    business_value = riron_per * per_eps                     # 事業価値
 
-    # ────────────────────────────────────────────────────────────────────────
-    # 3. 市場リスク補正（リーマンショックルール）
+    # ════════════════════════════════════════════════════════════════════════
+    # 3. 市場リスク（リーマンショックルール）
     #    PBR ≥ 0.5 なら適用なし
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
     if pbr >= 0.50:
         risk_rate = 0.00
     elif pbr >= 0.41:
@@ -2174,32 +2336,44 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
     else:
         risk_rate = 0.80
 
-    base_value   = asset_value + business_value
-    market_risk  = base_value * risk_rate
+    base_value  = asset_value + business_value
+    market_risk = base_value * risk_rate
 
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
     # 4. 理論株価
-    # ────────────────────────────────────────────────────────────────────────
+    # ════════════════════════════════════════════════════════════════════════
     theoretical = base_value - market_risk
     divergence  = (theoretical - current_price) / current_price * 100 if current_price else None
 
     return {
+        # 最終結果
         "theoretical_price": round(theoretical, 0),
         "divergence_pct":    round(divergence, 1) if divergence is not None else None,
+        # 内訳
         "asset_value":       round(asset_value, 0),
         "business_value":    round(business_value, 0),
         "market_risk":       round(market_risk, 0),
         "risk_rate":         risk_rate,
+        # 資産価値の根拠
         "bps":               round(bps, 0),
+        "bps_src":           bps_src,
         "discount_rate":     discount,
         "equity_ratio_pct":  round(eq_pct, 1),
-        "roa_pct":           round(roa_raw * 100, 1),
-        "leverage":          round(leverage, 2),
-        "lev_corr":          round(lev_corr, 2),
-        "use_eps":           use_eps,
-        "is_forecast_eps":   is_forecast,
+        "eq_src":            eq_src,
+        # 事業価値の根拠
+        "riron_per":         round(riron_per, 1),
+        "roa_pct":           round(roa * 100, 1),
+        "roa_cap_pct":       round(roa_cap * 100, 1),
+        "roa_factor":        round(roa_factor, 2),
+        "roa_src":           roa_src,
+        "lev_denom":         round(lev_denom, 3),
+        "lev_corr":          round(lev_corr, 3),
+        "per_eps":           round(per_eps, 2),
+        "per_eps_src":       per_eps_src,
+        "forecast_oi_m":     forecast_oi,   # 百万円（Noneの場合あり）
+        "shares":            shares,
+        # 市場リスクの根拠
         "pbr":               pbr,
-        "per":               per,
     }
 
 
