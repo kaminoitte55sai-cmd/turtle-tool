@@ -160,8 +160,9 @@ try:
 except Exception:
     JQUANTS_REFRESH_TOKEN = "oi4woGg05PUMAi2Lx8WJm2udTm6_H2by1peFcYQaQOU"  # ローカル開発用
 
-JQUANTS_AUTH_URL  = "https://api.jquants.com/v1/token/auth_refresh"
-JQUANTS_FINS_URL  = "https://api.jquants.com/v1/fins/statements"
+JQUANTS_AUTH_URL   = "https://api.jquants.com/v1/token/auth_refresh"
+JQUANTS_FINS_URL   = "https://api.jquants.com/v1/fins/statements"
+JQUANTS_PRICE_URL  = "https://api.jquants.com/v1/prices/daily_quotes"
 
 # クラウド環境検出（Streamlit Cloud = Linux）
 import platform as _platform
@@ -1128,6 +1129,15 @@ def render_position_tab() -> None:
             st.session_state[_tp_sk] = not _tp_on
             st.rerun()
 
+    # ── データ取得エラーを永続表示（rerun後も消えない） ──────────────────────
+    _fetch_errs = st.session_state.get("pos_fetch_errors", {})
+    if _fetch_errs:
+        for _eticker, _emsg in list(_fetch_errs.items()):
+            st.error(f"⚠️ [{_eticker}] データ取得失敗: {_emsg}  ← 銘柄コードを確認してください")
+        if st.button("エラーをクリア", key="clr_fetch_err"):
+            st.session_state["pos_fetch_errors"] = {}
+            st.rerun()
+
     st.divider()
     col_tbl, col_up, col_dn, col_clr, col_del = st.columns([0.81, 0.0475, 0.0475, 0.0475, 0.0475])
 
@@ -1202,6 +1212,7 @@ def render_position_tab() -> None:
 
             if new_ticker != prev_ticker:
                 if new_ticker:
+                    _fetch_ok = False
                     with st.spinner(f"🔄 {new_ticker} のデータを取得中..."):
                         try:
                             market    = fetch_market_data(new_ticker)
@@ -1223,16 +1234,57 @@ def render_position_tab() -> None:
                                 "購入価格(円)": NAN, "購入価格(USD)": NAN,
                             }.items():
                                 st.session_state.df.at[i, k] = v
-                        except Exception as e:
-                            st.error(f"行{i + 1} [{new_ticker}] データ取得失敗 → {e}")
+
+                            # 取得成功 → エラーキャッシュをクリア
+                            _errs = st.session_state.setdefault("pos_fetch_errors", {})
+                            _errs.pop(new_ticker, None)
+                            _fetch_ok = True
+
+                        except Exception as _yf_err:
+                            # yfinance 失敗 → 日本株の場合は J-Quants でリトライ
+                            _jq_market = None
+                            if is_japan_stock(new_ticker):
+                                _code4 = new_ticker.upper().replace(".T", "")
+                                _jq_market = _jquants_fetch_market_data(_code4)
+
+                            if _jq_market is not None:
+                                japan     = True
+                                st.session_state.fx_rates[i] = 1.0
+                                name      = get_ticker_name(new_ticker)
+                                unit_size = calc_unit_size(capital, risk_pct, _jq_market.atr, japan, 1.0)
+                                entry     = _floor_jp(round(_jq_market.close, 2), japan)
+                                losscut   = calc_losscut(entry, _jq_market.atr, losscut_mult, True, japan)
+
+                                for k, v in {
+                                    "銘柄コード":       new_ticker, "銘柄名": name,
+                                    "前日終値":         entry, "ATR": _jq_market.atr,
+                                    "ユニットサイズ":   unit_size if unit_size is not None else NAN,
+                                    "建玉時株価":       entry, "1日のリスク": NAN,
+                                    "ロスカットライン": losscut if losscut is not None else NAN,
+                                    "購入価格(円)": NAN, "購入価格(USD)": NAN,
+                                }.items():
+                                    st.session_state.df.at[i, k] = v
+
+                                _errs = st.session_state.setdefault("pos_fetch_errors", {})
+                                _errs.pop(new_ticker, None)
+                                _fetch_ok = True
+                            else:
+                                # 両方失敗 → エラーを session_state に保存（rerun後も表示）
+                                _errs = st.session_state.setdefault("pos_fetch_errors", {})
+                                _errs[new_ticker] = f"yfinance: {_yf_err}"
+
+                    if _fetch_ok:
+                        st.session_state.prev_tickers[i] = new_ticker
+                        save_state()
+                        st.rerun()
+                    # 失敗時は prev_tickers を更新しない（次回再試行できるように）
                 else:
                     for k, v in empty_row().items():
                         st.session_state.df.at[i, k] = v
                     st.session_state.fx_rates[i] = 1.0
-
-                st.session_state.prev_tickers[i] = new_ticker
-                save_state()
-                st.rerun()
+                    st.session_state.prev_tickers[i] = new_ticker
+                    save_state()
+                    st.rerun()
             elif new_ticker:
                 if recalc_row(i, capital, risk_pct, losscut_mult):
                     needs_rerun = True
@@ -2216,6 +2268,66 @@ def _jquants_get_id_token() -> str:
         return resp.json().get("idToken", "")
     except Exception:
         return ""
+
+
+@st.cache_data(ttl=1800, show_spinner=False)    # 30分キャッシュ
+def _jquants_fetch_market_data(code4: str):
+    """
+    J-Quants daily_quotes から終値・ATR を取得して MarketData を返す。
+    yfinance が失敗した場合の日本株フォールバック。
+
+    Parameters
+    ----------
+    code4 : 4桁証券コード（例: "7203"）
+
+    Returns
+    -------
+    MarketData | None : 取得成功時は MarketData、失敗時は None
+    """
+    import datetime as _dt
+    id_token = _jquants_get_id_token()
+    if not id_token:
+        return None
+    try:
+        # 過去60営業日分を取得するため90日前から取得
+        _from = (_dt.date.today() - _dt.timedelta(days=90)).strftime("%Y%m%d")
+        resp = _req.get(
+            JQUANTS_PRICE_URL,
+            params={"code": code4, "from": _from},
+            headers={"Authorization": f"Bearer {id_token}"},
+            timeout=15,
+        )
+        quotes = resp.json().get("daily_quotes", [])
+        if not quotes or len(quotes) < 21:
+            return None
+
+        # 日付昇順ソート
+        quotes = sorted(quotes, key=lambda q: q.get("Date", ""))
+
+        closes = [float(q["Close"]) for q in quotes if q.get("Close") not in (None, "")]
+        highs  = [float(q["AdjustmentHigh"])  if q.get("AdjustmentHigh")  not in (None, "") else float(q.get("High",  closes[-1])) for q in quotes]
+        lows   = [float(q["AdjustmentLow"])   if q.get("AdjustmentLow")   not in (None, "") else float(q.get("Low",   closes[-1])) for q in quotes]
+
+        if len(closes) < 21:
+            return None
+
+        # ATR計算（20日）
+        trs = []
+        for j in range(1, len(closes)):
+            h, l, pc = highs[j], lows[j], closes[j - 1]
+            trs.append(max(h - l, abs(h - pc), abs(l - pc)))
+        atr = round(float(sum(trs[-20:]) / 20), 2)
+        close = round(closes[-1], 2)
+
+        from utils import MarketData, is_japan_stock
+        return MarketData(
+            ticker=code4 + ".T",
+            close=close,
+            atr=atr,
+            currency="JPY",
+        )
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=3600, show_spinner=False)    # 1時間キャッシュ
