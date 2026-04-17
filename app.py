@@ -1253,7 +1253,10 @@ def render_position_tab() -> None:
                     if _price is None:
                         _new_prices[_sc] = {"error": "現在値なし", "_name": _name, "_price": None}
                     else:
-                        _r2 = _calc_theoretical_price(_sc, _price)
+                        try:
+                            _r2 = _calc_theoretical_price(_sc, _price)
+                        except Exception as _ex:
+                            _r2 = {"error": f"計算エラー: {_ex}"}
                         _r2["_name"]  = _name
                         _r2["_price"] = _price
                         _new_prices[_sc] = _r2
@@ -1282,9 +1285,9 @@ def render_position_tab() -> None:
                             st.warning(f"⚠️ {_res['error']}")
                         continue
 
-                    # 正常系
+                    # 正常系（値が取れなければ安全なデフォルトにフォールバック）
                     _div    = _res.get("divergence_pct")
-                    _theory = _res.get("theoretical_price")
+                    _theory = _res.get("theoretical_price") or 0
                     _cur    = _res.get("_price") or _price or 0
                     try:
                         _div_f     = float(_div) if _div is not None else None
@@ -2137,21 +2140,44 @@ def edinet_get_shareholders(sec_code: str) -> dict:
 
 @st.cache_data(ttl=86400, show_spinner=False)   # 1日キャッシュ
 def edinet_get_financials(sec_code: str) -> dict:
-    """証券コード(4桁) → EdinetDB get_financials 最新年度データを返す（単位:円）。"""
+    """証券コード(4桁) → EdinetDB get_financials 最新年度データを返す（単位:円）。
+
+    get_financials のレスポンス形式が複数あるため、柔軟に対応する:
+      - JSON配列 [{"fiscalYear":2025, ...}, ...]  → 先頭要素を返す
+      - {"financials": [...], ...}                → .financials の先頭を返す
+      - {"fiscalYear":2025, ...}  (フラット)      → そのまま返す
+    """
     edinet_code = edinet_get_edinet_code(sec_code)
     if not edinet_code:
         return {}
-    result = _call_edinetdb("get_financials", edinet_code=edinet_code, years=1)
+    try:
+        result = _call_edinetdb("get_financials", edinet_code=edinet_code, years=1)
+    except Exception:
+        return {}
+
+    # ── JSON配列として返ってきた場合 ─────────────────────────────────────
+    if isinstance(result, list):
+        return result[0] if result else {}
+
+    # ── dict でなければ諦める ─────────────────────────────────────────────
+    if not isinstance(result, dict):
+        return {}
+
+    # ── エラー dict ──────────────────────────────────────────────────────
     if "error" in result:
         return {}
-    # レスポンスは {"financials": [...]} または直接リストの場合がある
-    items = result.get("financials", [])
-    if not items and isinstance(result, list):
-        items = result
-    if items:
-        return items[0]     # 最新年度
-    # フラットな dict として返る場合もある
-    return result if result.get("fiscalYear") else {}
+
+    # ── {"financials": [...]} 形式 ────────────────────────────────────────
+    for _key in ("financials", "data", "items", "results"):
+        _items = result.get(_key)
+        if isinstance(_items, list) and _items:
+            return _items[0]
+
+    # ── フラットな dict（bps や fiscalYear などを直接持つ）────────────────
+    if any(k in result for k in ("fiscalYear", "bps", "totalAssets", "netAssets")):
+        return result
+
+    return {}
 
 
 @st.cache_data(ttl=3600, show_spinner=False)    # 1時間キャッシュ
@@ -2160,11 +2186,24 @@ def edinet_get_latest_earnings(sec_code: str) -> dict:
     edinet_code = edinet_get_edinet_code(sec_code)
     if not edinet_code:
         return {}
-    result = _call_edinetdb("get_earnings", edinet_code=edinet_code, limit=4)
-    earnings = result.get("earnings", []) if isinstance(result, dict) else []
+    try:
+        result = _call_edinetdb("get_earnings", edinet_code=edinet_code, limit=4)
+    except Exception:
+        return {}
+
+    # レスポンス形式を柔軟に処理
+    if isinstance(result, list):
+        earnings = result
+    elif isinstance(result, dict):
+        earnings = result.get("earnings") or result.get("data") or []
+        if not isinstance(earnings, list):
+            earnings = []
+    else:
+        earnings = []
+
     # forecastOrdinaryIncome を含む最新エントリを優先
     for e in earnings:
-        if e.get("forecastOrdinaryIncome") is not None:
+        if isinstance(e, dict) and e.get("forecastOrdinaryIncome") is not None:
             return e
     return earnings[0] if earnings else {}
 
@@ -2195,11 +2234,24 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
       PBR         : get_financials.pbr → get_company.priceToBook/pbr
     """
     # ── データ取得 ─────────────────────────────────────────────────────────
-    edb  = edinet_get_company(sec_code)
-    if "error" in edb:
-        return {"error": edb["error"]}
-    fin  = edinet_get_financials(sec_code)        # 財務諸表（年次、単位:円）
-    earn = edinet_get_latest_earnings(sec_code)   # 最新決算短信（単位:百万円）
+    try:
+        edb  = edinet_get_company(sec_code)
+    except Exception as _e:
+        return {"error": f"get_company 失敗: {_e}"}
+    if not isinstance(edb, dict) or "error" in edb:
+        return {"error": edb.get("error", "get_company 失敗") if isinstance(edb, dict) else "get_company 失敗"}
+
+    try:
+        fin  = edinet_get_financials(sec_code)        # 財務諸表（年次、単位:円）
+    except Exception:
+        fin  = {}
+    try:
+        earn = edinet_get_latest_earnings(sec_code)   # 最新決算短信（単位:百万円）
+    except Exception:
+        earn = {}
+
+    if not isinstance(fin,  dict): fin  = {}
+    if not isinstance(earn, dict): earn = {}
 
     # ── 1株純資産（BPS）──────────────────────────────────────────────────
     bps     = fin.get("bps")
