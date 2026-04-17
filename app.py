@@ -984,16 +984,33 @@ def render_position_tab() -> None:
     _pnl_loss   = float(_pnl_series[_pnl_series < 0].sum()) if len(_pnl_series) > 0 else 0.0
     _pos_count  = int((st.session_state.df["銘柄コード"] != "").sum())
 
+    def _pnl_card(col, label: str, amount: float, show_rate: bool = False) -> None:
+        """評価損益を色付きカードで表示。含み益=緑、含み損=赤。"""
+        _c = "#16a34a" if amount >= 0 else "#dc2626"   # green-700 / red-600
+        _sign = "+" if amount >= 0 else ""
+        _rate_html = ""
+        if show_rate and st.session_state.capital:
+            _r = amount / st.session_state.capital * 100
+            _rate_html = f'<div style="font-size:0.78em;color:{_c};margin-top:1px;">{_r:+.2f}%</div>'
+        col.markdown(
+            f"""
+            <div style="padding:6px 0 2px;">
+              <div style="font-size:0.82em;color:#555;font-weight:500;">{label}</div>
+              <div style="font-size:1.25em;font-weight:700;color:{_c};line-height:1.3;">
+                {_sign}¥{amount:,.0f}
+              </div>
+              {_rate_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     # ── サマリーメトリクス行 ──────────────────────────────────────────────
     _m1, _m2, _m3, _m4, _m5 = st.columns(5)
     _m1.metric("💴 残高", f"¥{balance:,.0f}")
-    _m2.metric(
-        "📈 評価損益合計",
-        f"¥{_pnl_total:+,.0f}",
-        delta=f"{_pnl_total/st.session_state.capital*100:+.2f}%" if st.session_state.capital else None,
-    )
-    _m3.metric("🟢 含み益", f"¥{_pnl_gain:+,.0f}")
-    _m4.metric("🔴 含み損", f"¥{_pnl_loss:+,.0f}")
+    _pnl_card(_m2, "📈 評価損益合計", _pnl_total, show_rate=True)
+    _pnl_card(_m3, "🟢 含み益",       _pnl_gain)
+    _pnl_card(_m4, "🔴 含み損",       _pnl_loss)
     _m5.metric("📋 保有銘柄数", f"{_pos_count} 銘柄")
 
     c1, c2, c3, c4 = st.columns(4)
