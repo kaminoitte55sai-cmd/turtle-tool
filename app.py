@@ -401,12 +401,17 @@ def init_state() -> None:
 # ===========================================================================
 
 def normalize_ticker(code: str) -> str:
+    import re as _re
     code = code.strip().upper()
     if not code:
         return code
     if code.endswith(".T"):
         return code
+    # 通常の数字コード（例: 7203）
     if code.isdigit():
+        return code + ".T"
+    # 新形式コード（例: 471A, 123B）: 数字3〜4桁 + アルファベット1文字
+    if _re.match(r'^\d{3,4}[A-Z]$', code):
         return code + ".T"
     return code
 
@@ -865,7 +870,8 @@ def _parse_screener_csv(uploaded_file) -> tuple[list[str], str | None]:
 
     def _looks_like_code(val: str) -> bool:
         v = val.strip().split(".")[0]
-        return v.isdigit() and 3 <= len(v) <= 6
+        # 通常の数字コード（例: 7203）または新形式（例: 471A）
+        return (v.isdigit() and 3 <= len(v) <= 6) or bool(_re.match(r'^\d{3,4}[A-Z]$', v))
 
     try:
         csv_df = pd.read_csv(uploaded_file, dtype=str)
@@ -913,8 +919,8 @@ def _parse_screener_csv(uploaded_file) -> tuple[list[str], str | None]:
             if not val or val.lower() in ("nan", "none", ""):
                 continue
             base = val.split(".")[0].strip()
-            if base.isdigit():
-                val = base + ".T"
+            if base.isdigit() or _re.match(r'^\d{3,4}[A-Z]$', base.upper()):
+                val = base.upper() + ".T"
             elif not val.replace(".", "").replace("-", "").replace("_", "").replace(" ", "").isalnum():
                 continue
             tickers.append(val.upper())
