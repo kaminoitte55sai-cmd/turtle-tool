@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import certifi
 import os
+import platform
 import shutil
 from dataclasses import dataclass, field
 
@@ -20,16 +21,20 @@ from dataclasses import dataclass, field
 # curl_cffi が SSL 証明書ファイルのパスを読めず SSLError になる。
 # 対策: ASCII パスにある ProgramData へ証明書をコピーし、
 #       curl_cffi のロード（= yfinance の import）より前に環境変数をセットする。
+# Linux / Streamlit Cloud ではそのまま certifi の標準パスを使う。
 # ---------------------------------------------------------------------------
-_CERT_DST = r"C:\ProgramData\yfinance_ssl\cacert.pem"
-
-if not os.path.exists(_CERT_DST):
-    os.makedirs(os.path.dirname(_CERT_DST), exist_ok=True)
-    shutil.copy2(certifi.where(), _CERT_DST)
-
-# この2行は yfinance import より必ず前に置くこと
-os.environ.setdefault("CURL_CA_BUNDLE", _CERT_DST)
-os.environ.setdefault("SSL_CERT_FILE",  _CERT_DST)
+if platform.system() == "Windows":
+    _CERT_DST = r"C:\ProgramData\yfinance_ssl\cacert.pem"
+    if not os.path.exists(_CERT_DST):
+        os.makedirs(os.path.dirname(_CERT_DST), exist_ok=True)
+        shutil.copy2(certifi.where(), _CERT_DST)
+    os.environ.setdefault("CURL_CA_BUNDLE", _CERT_DST)
+    os.environ.setdefault("SSL_CERT_FILE",  _CERT_DST)
+else:
+    # Linux / macOS（Streamlit Cloud など）: certifi 標準パスをそのまま使用
+    _cert = certifi.where()
+    os.environ.setdefault("CURL_CA_BUNDLE", _cert)
+    os.environ.setdefault("SSL_CERT_FILE",  _cert)
 
 import pandas as pd
 import yfinance as yf
