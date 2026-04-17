@@ -2982,8 +2982,8 @@ def render_funda_tab() -> None:
 
     # ── テーブルヘッダー ─────────────────────────────────────────────────
     _FUNDA_LABELS = ["コード", "銘柄名", "現在価格", "前日比(%)",
-                     "かぶたん", "理論株価", "チャート", "G", "X", "Yahoo", "📌", "メモ", "削除"]
-    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.5, 0.5, 0.6, 0.5, 0.6, 0.5]
+                     "かぶたん", "理論株価", "チャート", "G", "X", "Yahoo", "YT", "📌", "メモ", "削除"]
+    _FUNDA_WIDTHS = [0.8, 1.7, 1.0, 0.9, 0.8, 0.8, 0.6, 0.5, 0.5, 0.6, 0.5, 0.5, 0.6, 0.5]
     _hdr_cs = st.columns(_FUNDA_WIDTHS)
     for _hc, _lbl in zip(_hdr_cs, _FUNDA_LABELS):
         _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
@@ -3040,20 +3040,26 @@ def render_funda_tab() -> None:
         with _rc[9]:
             st.link_button("Yahoo", f"https://finance.yahoo.co.jp/quote/{_ticker_clean}")
 
-        # ポジションリストへ追加ボタン
+        # YouTube 検索
         with _rc[10]:
+            import urllib.parse as _up2
+            _yt_name = _up2.quote(_jp_name) if _jp_name != "—" else _up2.quote(_ticker_clean)
+            st.link_button("YT", f"https://www.youtube.com/results?search_query={_yt_name}")
+
+        # ポジションリストへ追加ボタン
+        with _rc[11]:
             _pos_key = f"pos_panel_{_code_raw}"
             if st.button("📌", key=f"pos_btn_{_code_raw}", help="ポジション管理リストへ追加"):
                 st.session_state[_pos_key] = not st.session_state.get(_pos_key, False)
 
         # メモ開閉ボタン
-        with _rc[11]:
+        with _rc[12]:
             _memo_key = f"memo_open_{_code_raw}"
             if st.button("📝", key=f"memo_btn_{_code_raw}"):
                 st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
 
         # 削除ボタン
-        with _rc[12]:
+        with _rc[13]:
             if st.button("🗑️", key=f"del_funda_{_code_raw}"):
                 st.session_state.fund_df = st.session_state.fund_df[
                     st.session_state.fund_df["code"] != _code_raw
