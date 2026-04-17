@@ -1010,6 +1010,18 @@ def render_position_tab() -> None:
     # ════════════════════════════════════════════════════════════════════════
     n_rows = st.session_state.n_rows
 
+    # ── prev_tickers / fx_rates の長さを n_rows に合わせる安全ガード ────────
+    _pt = st.session_state.prev_tickers
+    _fx = st.session_state.fx_rates
+    while len(_pt) < n_rows:
+        _pt.append("")
+    while len(_pt) > n_rows:
+        _pt.pop()
+    while len(_fx) < n_rows:
+        _fx.append(1.0)
+    while len(_fx) > n_rows:
+        _fx.pop()
+
     total_purchase = float(st.session_state.df["購入価格(円)"].dropna().sum())
     balance        = st.session_state.capital - total_purchase
 
@@ -2841,6 +2853,11 @@ def _add_ticker_to_pos_list(ticker: str, target_list_id: int) -> str:
         records: list[dict] = saved.get("df_records", [])
         n_rows: int = saved.get("n_rows", INITIAL_ROWS)
 
+        # prev_tickers を取得・長さ補正
+        prev_tickers: list = saved.get("prev_tickers", [""] * n_rows)
+        while len(prev_tickers) < len(records):
+            prev_tickers.append("")
+
         # 空きスロットを探す
         empty_idx = next(
             (i for i, r in enumerate(records) if not r.get("銘柄コード")),
@@ -2848,14 +2865,17 @@ def _add_ticker_to_pos_list(ticker: str, target_list_id: int) -> str:
         )
         if empty_idx is not None:
             records[empty_idx]["銘柄コード"] = ticker
+            prev_tickers[empty_idx] = ""   # fetch を確実にトリガーするため空に
         else:
             new_row = empty_row()
             new_row["銘柄コード"] = ticker
             records.append(new_row)
+            prev_tickers.append("")        # 新行分を追加
             n_rows = len(records)
 
-        saved["df_records"] = records
-        saved["n_rows"] = n_rows
+        saved["df_records"]  = records
+        saved["n_rows"]      = n_rows
+        saved["prev_tickers"] = prev_tickers
         with open(_list_save_file(target_list_id), "w", encoding="utf-8") as _fp:
             json.dump(saved, _fp, ensure_ascii=False)
 
