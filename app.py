@@ -2281,13 +2281,28 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
             eq_src = "get_company"
 
     # ── ROA（総資産利益率）────────────────────────────────────────────────
+    # 予想純利益を優先使用。総資産は fin（円）、なければ earn（百万円→円換算）。
     roa     = None
     roa_src = ""
-    ni_fin  = fin.get("netIncome")
-    ta_fin  = fin.get("totalAssets")
-    if ni_fin and ta_fin and ta_fin > 0:
-        roa     = ni_fin / ta_fin
-        roa_src = f"純利益({ni_fin/1e8:.1f}億)÷総資産({ta_fin/1e8:.1f}億)"
+
+    _forecast_ni = earn.get("forecastNetIncome")   # 百万円
+    _ta_fin      = fin.get("totalAssets")          # 円
+    _ta_earn     = earn.get("totalAssets")          # 百万円（最新Q末）
+
+    # ① 予想純利益 ÷ 総資産（fin）
+    if _forecast_ni and _ta_fin and _ta_fin > 0:
+        roa     = (_forecast_ni * 1_000_000) / _ta_fin
+        roa_src = f"予想純利益({_forecast_ni:,}百万円)÷総資産({_ta_fin/1e8:.1f}億円)"
+    # ② 予想純利益 ÷ 総資産（earn）
+    elif _forecast_ni and _ta_earn and _ta_earn > 0:
+        roa     = _forecast_ni / _ta_earn          # 両方百万円なので比率は同じ
+        roa_src = f"予想純利益({_forecast_ni:,}百万円)÷総資産({_ta_earn:,}百万円)"
+    # ③ 実績純利益 ÷ 総資産（フォールバック）
+    elif fin.get("netIncome") and _ta_fin and _ta_fin > 0:
+        _ni_act = fin["netIncome"]
+        roa     = _ni_act / _ta_fin
+        roa_src = f"実績純利益({_ni_act/1e8:.1f}億円)÷総資産({_ta_fin/1e8:.1f}億円)【予想なし】"
+    # ④ ROE × 自己資本比率（最終フォールバック）
     else:
         roe_v = fin.get("roeOfficial") or edb.get("roe")
         if roe_v and equity_ratio and equity_ratio > 0:
