@@ -386,8 +386,29 @@ def normalize_ticker(code: str) -> str:
     return code
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_ticker_name(ticker: str) -> str:
+    """銘柄コードから銘柄名を取得する。日本株はEdinetDB優先→YahooFinance→yfinance の順で試みる。"""
     if is_japan_stock(ticker):
+        _code = ticker.upper().replace(".T", "")
+
+        # ① EdinetDB（最も信頼性高・クラウドでも動作）
+        try:
+            _r = _call_edinetdb("search_companies", query=_code)
+            for _c in _r.get("companies", []):
+                if str(_c.get("secCode", "")).startswith(_code):
+                    _n = _c.get("name") or _c.get("filerName")
+                    if _n:
+                        return _n
+            # 先頭一致がなければ最初の候補を使用
+            if _r.get("companies"):
+                _n = _r["companies"][0].get("name") or _r["companies"][0].get("filerName")
+                if _n:
+                    return _n
+        except Exception:
+            pass
+
+        # ② Yahoo Finance Search API（ローカル環境向け）
         try:
             r = _req.get(
                 "https://query1.finance.yahoo.com/v1/finance/search",
@@ -402,6 +423,8 @@ def get_ticker_name(ticker: str) -> str:
                         return name
         except Exception:
             pass
+
+    # ③ yfinance info（米国株・最終フォールバック）
     try:
         info = yf.Ticker(ticker).info
         return info.get("longName") or info.get("shortName") or ticker
