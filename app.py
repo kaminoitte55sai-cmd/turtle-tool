@@ -3114,12 +3114,16 @@ def render_funda_tab() -> None:
         return
 
     # ── fund_df に新列がなければデフォルト追加 ──────────────────────────────
-    if "rating" not in fund_df.columns:
-        fund_df["rating"] = ""
+    _funda_cols_defaults = {"rating": "", "notebooklm": "False", "score": ""}
+    _funda_col_added = False
+    for _col, _default in _funda_cols_defaults.items():
+        if _col not in fund_df.columns:
+            fund_df[_col] = _default
+            _funda_col_added = True
+    if _funda_col_added:
         st.session_state.fund_df = fund_df
-    if "notebooklm" not in fund_df.columns:
-        fund_df["notebooklm"] = "False"
-        st.session_state.fund_df = fund_df
+
+    import urllib.parse as _up
 
     # マスタから銘柄名マップを作成（日本語名）
     _funda_name_map = {}
@@ -3130,31 +3134,97 @@ def render_funda_tab() -> None:
         ))
 
     _RATING_OPTIONS = ["", "×", "△", "〇", "◎"]
+    _SCORE_OPTIONS  = [""] + [str(v) for v in range(-10, 0)] + ["0"] + [f"+{v}" for v in range(1, 11)]
 
-    # ── テーブルヘッダー ─────────────────────────────────────────────────
-    _FUNDA_LABELS = ["コード", "銘柄名", "評価", "NLM",
-                     "かぶたん", "理論株価", "チャート", "G", "X", "Yahoo", "YT", "📌", "メモ", "削除"]
-    _FUNDA_WIDTHS = [0.8, 1.7, 0.65, 0.45, 0.8, 0.8, 0.6, 0.5, 0.5, 0.6, 0.5, 0.5, 0.6, 0.5]
+    # ── カラム定義（順序: コード 銘柄名 チャート 理論株価 G X Yahoo YT かぶたん メモ スコア 評価 NLM 📌 削除）
+    _FUNDA_LABELS = ["コード", "銘柄名", "📈", "理論", "G", "𝕏", "Yahoo", "YT",
+                     "かぶたん", "📝", "スコア", "評価", "NLM", "📌", "🗑️"]
+    _FUNDA_WIDTHS = [0.75, 1.55, 0.42, 0.55, 0.38, 0.38, 0.55, 0.38,
+                     0.60, 0.38, 0.55, 0.52, 0.40, 0.40, 0.40]
+
+    # ── ヘッダー行 ───────────────────────────────────────────────────────
     _hdr_cs = st.columns(_FUNDA_WIDTHS)
     for _hc, _lbl in zip(_hdr_cs, _FUNDA_LABELS):
-        _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
+        _hc.markdown(
+            f"<div style='font-size:0.72em;font-weight:700;color:#64748b;"
+            f"text-transform:uppercase;letter-spacing:0.04em;padding:2px 0;'>{_lbl}</div>",
+            unsafe_allow_html=True,
+        )
+    st.markdown(
+        '<div style="height:2px;background:linear-gradient(to right,#3b82f6 0%,#e2e8f0 60%);'
+        'margin:0 0 4px 0;border-radius:1px;"></div>',
+        unsafe_allow_html=True,
+    )
 
     _any_funda_changed = False
     for _idx, _row in fund_df.iterrows():
         _rc = st.columns(_FUNDA_WIDTHS)
 
-        # コード・銘柄名
+        # ── コード・銘柄名 ──────────────────────────────────────────────
         _code_raw     = str(_row.get("code", ""))
         _ticker_clean = _code_raw.replace(".T", "").replace(".t", "")
         _jp_name      = _funda_name_map.get(_ticker_clean) or _funda_name_map.get(_code_raw) or "—"
-        _rc[0].write(_code_raw)
-        _rc[1].write(_jp_name)
+        _rc[0].markdown(
+            f"<span style='font-size:0.88em;font-weight:600;color:#1e40af;font-family:monospace;'>"
+            f"{_ticker_clean}</span>",
+            unsafe_allow_html=True,
+        )
+        _rc[1].markdown(
+            f"<span style='font-size:0.88em;'>{_jp_name}</span>",
+            unsafe_allow_html=True,
+        )
 
-        # 評価プルダウン（×/△/〇/◎）
+        # ── リンクボタン群 ─────────────────────────────────────────────
+        with _rc[2]:   # TradingView チャート
+            st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_ticker_clean}",
+                           use_container_width=True)
+        with _rc[3]:   # 理論株価
+            st.link_button("理論", f"https://kabubiz.com/riron/stock.php?c={_ticker_clean}",
+                           use_container_width=True)
+        with _rc[4]:   # Google Finance
+            st.link_button("G", f"https://www.google.com/finance/quote/{_ticker_clean}:TYO?hl=ja",
+                           use_container_width=True)
+        with _rc[5]:   # X（旧Twitter）
+            _x_name = _up.quote(_jp_name) if _jp_name != "—" else _up.quote(_ticker_clean)
+            st.link_button("𝕏", f"https://x.com/search?q={_x_name}&src=typed_query&f=top",
+                           use_container_width=True)
+        with _rc[6]:   # Yahoo ファイナンス
+            st.link_button("Yahoo", f"https://finance.yahoo.co.jp/quote/{_ticker_clean}",
+                           use_container_width=True)
+        with _rc[7]:   # YouTube
+            _yt_name = _up.quote(_jp_name) if _jp_name != "—" else _up.quote(_ticker_clean)
+            st.link_button("YT", f"https://www.youtube.com/results?search_query={_yt_name}",
+                           use_container_width=True)
+        with _rc[8]:   # かぶたん
+            st.link_button("かぶたん", f"https://kabutan.jp/stock/news?code={_ticker_clean}",
+                           use_container_width=True)
+
+        # ── メモ開閉ボタン ─────────────────────────────────────────────
+        with _rc[9]:
+            _memo_key = f"memo_open_{_code_raw}"
+            if st.button("📝", key=f"memo_btn_{_code_raw}", use_container_width=True):
+                st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
+
+        # ── スコア（-10 〜 +10）────────────────────────────────────────
+        _stored_score = str(_row.get("score", ""))
+        if _stored_score not in _SCORE_OPTIONS:
+            _stored_score = ""
+        _new_score = _rc[10].selectbox(
+            "スコア",
+            options=_SCORE_OPTIONS,
+            index=_SCORE_OPTIONS.index(_stored_score),
+            key=f"score_{_code_raw}",
+            label_visibility="collapsed",
+        )
+        if _new_score != _stored_score:
+            fund_df.at[_idx, "score"] = _new_score
+            _any_funda_changed = True
+
+        # ── 評価プルダウン（×/△/〇/◎）────────────────────────────────
         _stored_rating = str(_row.get("rating", ""))
         if _stored_rating not in _RATING_OPTIONS:
             _stored_rating = ""
-        _new_rating = _rc[2].selectbox(
+        _new_rating = _rc[11].selectbox(
             "評価",
             options=_RATING_OPTIONS,
             index=_RATING_OPTIONS.index(_stored_rating),
@@ -3165,9 +3235,9 @@ def render_funda_tab() -> None:
             fund_df.at[_idx, "rating"] = _new_rating
             _any_funda_changed = True
 
-        # NotebookLM チェックボックス
+        # ── NotebookLM チェックボックス ───────────────────────────────
         _stored_nlm = str(_row.get("notebooklm", "False")).lower() == "true"
-        _new_nlm = _rc[3].checkbox(
+        _new_nlm = _rc[12].checkbox(
             "NLM",
             value=_stored_nlm,
             key=f"nlm_{_code_raw}",
@@ -3177,53 +3247,16 @@ def render_funda_tab() -> None:
             fund_df.at[_idx, "notebooklm"] = str(_new_nlm)
             _any_funda_changed = True
 
-        # かぶたん
-        with _rc[4]:
-            st.link_button("かぶたん", f"https://kabutan.jp/stock/news?code={_ticker_clean}")
-
-        # 理論株価
-        with _rc[5]:
-            st.link_button("理論株価", f"https://kabubiz.com/riron/stock.php?c={_ticker_clean}")
-
-        # TradingView チャート
-        with _rc[6]:
-            st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_ticker_clean}")
-
-        # Google Finance
-        with _rc[7]:
-            st.link_button("G", f"https://www.google.com/finance/quote/{_ticker_clean}:TYO?hl=ja")
-
-        # X（旧Twitter）検索
-        with _rc[8]:
-            import urllib.parse as _up
-            _x_name = _up.quote(_jp_name) if _jp_name != "—" else _up.quote(_ticker_clean)
-            st.link_button("𝕏", f"https://x.com/search?q={_x_name}&src=typed_query&f=top")
-
-        # Yahoo ファイナンス
-        with _rc[9]:
-            st.link_button("Yahoo", f"https://finance.yahoo.co.jp/quote/{_ticker_clean}")
-
-        # YouTube 検索
-        with _rc[10]:
-            import urllib.parse as _up2
-            _yt_name = _up2.quote(_jp_name) if _jp_name != "—" else _up2.quote(_ticker_clean)
-            st.link_button("YT", f"https://www.youtube.com/results?search_query={_yt_name}")
-
-        # ポジションリストへ追加ボタン
-        with _rc[11]:
+        # ── ポジションリストへ追加 ─────────────────────────────────────
+        with _rc[13]:
             _pos_key = f"pos_panel_{_code_raw}"
-            if st.button("📌", key=f"pos_btn_{_code_raw}", help="ポジション管理リストへ追加"):
+            if st.button("📌", key=f"pos_btn_{_code_raw}",
+                         help="ポジション管理リストへ追加", use_container_width=True):
                 st.session_state[_pos_key] = not st.session_state.get(_pos_key, False)
 
-        # メモ開閉ボタン
-        with _rc[12]:
-            _memo_key = f"memo_open_{_code_raw}"
-            if st.button("📝", key=f"memo_btn_{_code_raw}"):
-                st.session_state[_memo_key] = not st.session_state.get(_memo_key, False)
-
-        # 削除ボタン
-        with _rc[13]:
-            if st.button("🗑️", key=f"del_funda_{_code_raw}"):
+        # ── 削除ボタン ────────────────────────────────────────────────
+        with _rc[14]:
+            if st.button("🗑️", key=f"del_funda_{_code_raw}", use_container_width=True):
                 st.session_state.fund_df = st.session_state.fund_df[
                     st.session_state.fund_df["code"] != _code_raw
                 ].reset_index(drop=True)
@@ -3235,27 +3268,32 @@ def render_funda_tab() -> None:
                     save_memo_data(st.session_state.funda_memos)
                 st.rerun()
 
-        # ── ポジションリスト選択パネル ────────────────────────────────────────
+        # ── 行区切り線 ────────────────────────────────────────────────
+        st.markdown(
+            '<hr style="margin:2px 0 4px 0;border:none;border-top:1px solid #e2e8f0;">',
+            unsafe_allow_html=True,
+        )
+
+        # ── ポジションリスト選択パネル ────────────────────────────────
         if st.session_state.get(f"pos_panel_{_code_raw}", False):
             with st.container(border=True):
                 st.markdown(f"**📌 {_jp_name}（{_ticker_clean}）をポジション管理リストへ追加**")
                 _list_names = st.session_state.get("list_names", {})
-                _active = st.session_state.get("active_list", 1)
-                _btn_cols = st.columns(NUM_POS_LISTS)
+                _active     = st.session_state.get("active_list", 1)
+                _btn_cols   = st.columns(NUM_POS_LISTS)
                 for _lid in range(1, NUM_POS_LISTS + 1):
                     _lname = _list_names.get(_lid, f"リスト{_lid}")
                     _label = f"{'▶ ' if _lid == _active else ''}{_lname}"
                     with _btn_cols[_lid - 1]:
                         if st.button(_label, key=f"pos_add_{_code_raw}_{_lid}",
                                      use_container_width=True):
-                            # _ticker_clean は ".T" なし → normalize して渡す
                             _msg = _add_ticker_to_pos_list(
                                 normalize_ticker(_ticker_clean), _lid)
                             st.session_state[f"pos_panel_{_code_raw}"] = False
                             st.toast(_msg)
                             st.rerun()
 
-        # ── メモ展開エリア ──────────────────────────────────────────────────
+        # ── メモ展開エリア ────────────────────────────────────────────
         if st.session_state.get(f"memo_open_{_code_raw}", False):
             _current_memo = st.session_state.funda_memos.get(_code_raw, "")
             _new_memo = st.text_area(
@@ -3270,7 +3308,7 @@ def render_funda_tab() -> None:
                 save_memo_data(st.session_state.funda_memos)
                 st.success("✅ メモを保存しました")
 
-    # 評価・NLM の変更を自動保存
+    # スコア・評価・NLM の変更を自動保存
     if _any_funda_changed:
         st.session_state.fund_df = fund_df
         save_funda_data(fund_df)
