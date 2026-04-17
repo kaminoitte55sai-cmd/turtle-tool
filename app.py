@@ -2632,7 +2632,7 @@ def _calc_theoretical_price(sec_code: str, current_price: float) -> dict:
         "per_eps":           round(per_eps, 2),
         "per_eps_src":       per_eps_src,
         "forecast_oi_m":     jq.get("_fo_oi_m"),   # 百万円（Noneの場合あり）
-        "shares":            shares,
+        "shares":            jq.get("sharesOutstanding"),
         # 市場リスクの根拠
         "pbr":               pbr,
     }
