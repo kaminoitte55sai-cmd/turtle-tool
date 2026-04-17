@@ -1,34 +1,34 @@
-﻿code,current_price,day_change_pct,error
-8707.T,3810.0,0.3952569169960474,
-471A.T,,,Too Many Requests. Rate limited. Try after a while.
-4413.T,2268.0,7.488151658767772,
-9534.T,906.0,-0.9836065573770493,
-2780.T,5410.0,-0.9157509157509158,
-255A.T,4425.0,5.9880239520958085,
-9726.T,,,Too Many Requests. Rate limited. Try after a while.
-8065.T,2736.0,-1.2630819198845182,
-8593.T,1460.0,-0.9161859518154056,
-4559.T,2315.0,0.5647263249348393,
-9729.T,2797.0,-1.5140845070422535,
-6929.T,3565.0,-1.3831258644536653,
-9889.T,1309.0,0.4604758250191865,
-5195.T,2146.0,-0.18604651162790697,
-4220.T,1742.0,-2.9526462395543174,
-4956.T,,,Too Many Requests. Rate limited. Try after a while.
-3608.T,,,Too Many Requests. Rate limited. Try after a while.
-3156.T,,,Too Many Requests. Rate limited. Try after a while.
-6349.T,,,Too Many Requests. Rate limited. Try after a while.
-7085.T,,,Too Many Requests. Rate limited. Try after a while.
-4746.T,,,Too Many Requests. Rate limited. Try after a while.
-4116.T,,,Too Many Requests. Rate limited. Try after a while.
-4828.T,,,Too Many Requests. Rate limited. Try after a while.
-3950.T,,,Too Many Requests. Rate limited. Try after a while.
-2681.T,,,Too Many Requests. Rate limited. Try after a while.
-7246.T,,,Too Many Requests. Rate limited. Try after a while.
-3252.T,,,Too Many Requests. Rate limited. Try after a while.
-6859.T,,,Too Many Requests. Rate limited. Try after a while.
-7239.T,,,Too Many Requests. Rate limited. Try after a while.
-8159.T,,,Too Many Requests. Rate limited. Try after a while.
-3150.T,,,Too Many Requests. Rate limited. Try after a while.
-8075.T,,,Too Many Requests. Rate limited. Try after a while.
-4481.T,,,Too Many Requests. Rate limited. Try after a while.
+﻿code,error
+8707.T,Too Many Requests. Rate limited. Try after a while.
+471A.T,Too Many Requests. Rate limited. Try after a while.
+4413.T,Too Many Requests. Rate limited. Try after a while.
+9534.T,Too Many Requests. Rate limited. Try after a while.
+2780.T,Too Many Requests. Rate limited. Try after a while.
+255A.T,Too Many Requests. Rate limited. Try after a while.
+9726.T,Too Many Requests. Rate limited. Try after a while.
+8065.T,Too Many Requests. Rate limited. Try after a while.
+8593.T,Too Many Requests. Rate limited. Try after a while.
+4559.T,Too Many Requests. Rate limited. Try after a while.
+9729.T,Too Many Requests. Rate limited. Try after a while.
+6929.T,Too Many Requests. Rate limited. Try after a while.
+9889.T,Too Many Requests. Rate limited. Try after a while.
+5195.T,Too Many Requests. Rate limited. Try after a while.
+4220.T,Too Many Requests. Rate limited. Try after a while.
+4956.T,Too Many Requests. Rate limited. Try after a while.
+3608.T,Too Many Requests. Rate limited. Try after a while.
+3156.T,Too Many Requests. Rate limited. Try after a while.
+6349.T,Too Many Requests. Rate limited. Try after a while.
+7085.T,Too Many Requests. Rate limited. Try after a while.
+4746.T,Too Many Requests. Rate limited. Try after a while.
+4116.T,Too Many Requests. Rate limited. Try after a while.
+4828.T,Too Many Requests. Rate limited. Try after a while.
+3950.T,Too Many Requests. Rate limited. Try after a while.
+2681.T,Too Many Requests. Rate limited. Try after a while.
+7246.T,Too Many Requests. Rate limited. Try after a while.
+3252.T,Too Many Requests. Rate limited. Try after a while.
+6859.T,Too Many Requests. Rate limited. Try after a while.
+7239.T,Too Many Requests. Rate limited. Try after a while.
+8159.T,Too Many Requests. Rate limited. Try after a while.
+3150.T,Too Many Requests. Rate limited. Try after a while.
+8075.T,Too Many Requests. Rate limited. Try after a while.
+4481.T,Too Many Requests. Rate limited. Try after a while.
