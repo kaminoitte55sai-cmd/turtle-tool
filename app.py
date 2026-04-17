@@ -3228,17 +3228,28 @@ def render_funda_tab() -> None:
             fund_df.at[_idx, "score"] = _new_score
             _any_funda_changed = True
 
-        # ── 評価プルダウン（×/△/〇/◎）────────────────────────────────
+        # ── 評価プルダウン（×→黒 △→緑 〇→青 ◎→赤）───────────────────
+        _RATING_COLORS = {"×": "#374151", "△": "#16a34a", "〇": "#2563eb", "◎": "#dc2626"}
         _stored_rating = str(_row.get("rating", ""))
         if _stored_rating not in _RATING_OPTIONS:
             _stored_rating = ""
-        _new_rating = _rc[11].selectbox(
-            "評価",
-            options=_RATING_OPTIONS,
-            index=_RATING_OPTIONS.index(_stored_rating),
-            key=f"rating_{_code_raw}",
-            label_visibility="collapsed",
-        )
+        with _rc[11]:
+            # 現在値を色付きバッジで表示（選択済みの場合のみ）
+            if _stored_rating:
+                _r_clr = _RATING_COLORS.get(_stored_rating, "#6b7280")
+                st.markdown(
+                    f"<div style='text-align:center;font-weight:800;font-size:1.15em;"
+                    f"color:{_r_clr};line-height:1;margin-bottom:-10px;'>"
+                    f"{_stored_rating}</div>",
+                    unsafe_allow_html=True,
+                )
+            _new_rating = st.selectbox(
+                "評価",
+                options=_RATING_OPTIONS,
+                index=_RATING_OPTIONS.index(_stored_rating),
+                key=f"rating_{_code_raw}",
+                label_visibility="collapsed",
+            )
         if _new_rating != _stored_rating:
             fund_df.at[_idx, "rating"] = _new_rating
             _any_funda_changed = True
