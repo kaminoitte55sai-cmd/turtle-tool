@@ -122,8 +122,16 @@ NUMERIC_COLS = [
 ]
 
 NAN          = float("nan")
-SAVE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "turtle_save.json")
+SAVE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "turtle_save.json")  # 旧互換用
 MASTER_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "master_save.pkl")
+
+# ── 複数ポジションリスト設定 ─────────────────────────────────────────────────
+NUM_POS_LISTS = 5
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+def _list_save_file(list_id: int) -> str:
+    """リストIDに対応する保存ファイルパスを返す。"""
+    return os.path.join(_BASE_DIR, f"turtle_save_{list_id}.json")
 FILTER_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "filter_save.json")
 FUNDA_FILE        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fundamental_list.csv")
 MEMO_FILE         = os.path.join(os.path.dirname(os.path.abspath(__file__)), "memo_save.json")
@@ -165,13 +173,18 @@ STRATEGIES: dict[str, str] = {
 # 保存 / 読み込み
 # ===========================================================================
 
-def save_state() -> None:
+def save_state(list_id: int | None = None) -> None:
+    """現在のポジションリストをファイルに保存する。list_id 省略時はアクティブリストへ保存。"""
+    if list_id is None:
+        list_id = st.session_state.get("active_list", 1)
     records = st.session_state.df.to_dict("records")
     clean = [
         {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in row.items()}
         for row in records
     ]
+    _names = st.session_state.get("list_names", {})
     data = {
+        "name":         _names.get(list_id, f"リスト{list_id}"),
         "n_rows":       st.session_state.n_rows,
         "capital":      st.session_state.capital,
         "losscut_mult": st.session_state.losscut_mult,
@@ -180,18 +193,53 @@ def save_state() -> None:
         "fx_rates":     st.session_state.fx_rates,
         "df_records":   clean,
     }
-    with open(SAVE_FILE, "w", encoding="utf-8") as f:
+    with open(_list_save_file(list_id), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
 
-def load_state() -> dict | None:
-    if not os.path.exists(SAVE_FILE):
+def load_state(list_id: int | None = None) -> dict | None:
+    """指定リストのデータを読み込む。list_id 省略時はアクティブリストから読む。"""
+    if list_id is None:
+        list_id = st.session_state.get("active_list", 1)
+    path = _list_save_file(list_id)
+    # リスト1 で新ファイルがなければ旧 turtle_save.json にフォールバック
+    if not os.path.exists(path) and list_id == 1 and os.path.exists(SAVE_FILE):
+        path = SAVE_FILE
+    if not os.path.exists(path):
         return None
     try:
-        with open(SAVE_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
+
+
+def _load_list_into_state(list_id: int) -> None:
+    """指定リストのデータを session_state に読み込む（リスト切替・初期化で使用）。"""
+    saved = load_state(list_id)
+    if saved:
+        n = saved.get("n_rows", INITIAL_ROWS)
+        st.session_state.n_rows       = n
+        st.session_state.capital      = saved.get("capital", 1_000_000)
+        st.session_state.losscut_mult = saved.get("losscut_mult", 2.0)
+        st.session_state.risk_pct     = saved.get("risk_pct", 0.01)
+        st.session_state.prev_tickers = saved.get("prev_tickers", [""] * n)
+        st.session_state.fx_rates     = saved.get("fx_rates", [1.0] * n)
+        st.session_state.df           = records_to_df(saved["df_records"])
+        # 保存されたリスト名を反映
+        _saved_name = saved.get("name")
+        if _saved_name:
+            _names = st.session_state.setdefault("list_names",
+                         {i: f"リスト{i}" for i in range(1, NUM_POS_LISTS + 1)})
+            _names[list_id] = _saved_name
+    else:
+        st.session_state.n_rows       = INITIAL_ROWS
+        st.session_state.capital      = 1_000_000
+        st.session_state.losscut_mult = 2.0
+        st.session_state.risk_pct     = 0.01
+        st.session_state.prev_tickers = [""] * INITIAL_ROWS
+        st.session_state.fx_rates     = [1.0] * INITIAL_ROWS
+        st.session_state.df           = make_empty_df(INITIAL_ROWS)
 
 
 def records_to_df(records: list[dict]) -> pd.DataFrame:
@@ -237,27 +285,20 @@ def make_empty_df(n: int) -> pd.DataFrame:
 
 
 def init_state() -> None:
-    if "df" in st.session_state:
-        return
+    # アクティブリスト・リスト名を初期化（初回のみ）
+    if "active_list" not in st.session_state:
+        st.session_state.active_list = 1
+    if "list_names" not in st.session_state:
+        # 保存済みファイルからリスト名を復元
+        _names: dict[int, str] = {}
+        for _lid in range(1, NUM_POS_LISTS + 1):
+            _d = load_state(_lid)
+            _names[_lid] = _d.get("name", f"リスト{_lid}") if _d else f"リスト{_lid}"
+        st.session_state.list_names = _names
 
-    saved = load_state()
-    if saved:
-        n = saved.get("n_rows", INITIAL_ROWS)
-        st.session_state.n_rows       = n
-        st.session_state.capital      = saved.get("capital", 1_000_000)
-        st.session_state.losscut_mult = saved.get("losscut_mult", 2.0)
-        st.session_state.risk_pct     = saved.get("risk_pct", 0.01)
-        st.session_state.prev_tickers = saved.get("prev_tickers", [""] * n)
-        st.session_state.fx_rates     = saved.get("fx_rates", [1.0] * n)
-        st.session_state.df           = records_to_df(saved["df_records"])
-    else:
-        st.session_state.n_rows       = INITIAL_ROWS
-        st.session_state.capital      = 1_000_000
-        st.session_state.losscut_mult = 2.0
-        st.session_state.risk_pct     = 0.01
-        st.session_state.prev_tickers = [""] * INITIAL_ROWS
-        st.session_state.fx_rates     = [1.0] * INITIAL_ROWS
-        st.session_state.df           = make_empty_df(INITIAL_ROWS)
+    # ポジションデータをアクティブリストから読み込む（初回のみ）
+    if "df" not in st.session_state:
+        _load_list_into_state(st.session_state.active_list)
 
     if "screener_results"     not in st.session_state:
         st.session_state.screener_results     = None
@@ -819,6 +860,65 @@ def _parse_screener_csv(uploaded_file) -> tuple[list[str], str | None]:
 # ===========================================================================
 
 def render_position_tab() -> None:
+    # ════════════════════════════════════════════════════════════════════════
+    # ▼ ポジションリスト選択（5つ）
+    # ════════════════════════════════════════════════════════════════════════
+    _active   = st.session_state.get("active_list", 1)
+    _names    = st.session_state.get("list_names", {i: f"リスト{i}" for i in range(1, NUM_POS_LISTS + 1)})
+
+    # タブ風ボタン横並び
+    _list_cols = st.columns(NUM_POS_LISTS)
+    for _ci, _col in enumerate(_list_cols):
+        _lid  = _ci + 1
+        _lbl  = _names.get(_lid, f"リスト{_lid}")
+        _type = "primary" if _lid == _active else "secondary"
+        if _col.button(f"{'▶ ' if _lid == _active else ''}{_lbl}",
+                       key=f"pl_switch_{_lid}",
+                       type=_type,
+                       use_container_width=True):
+            if _lid != _active:
+                save_state(_active)                     # 現在リストを自動保存
+                st.session_state.active_list = _lid
+                _load_list_into_state(_lid)             # 新リストを読み込み
+                st.rerun()
+
+    # リスト名編集 + 自動保存ステータス
+    _edit_col, _save_col, _info_col = st.columns([0.35, 0.15, 0.5])
+    with _edit_col:
+        _new_name = st.text_input(
+            "リスト名",
+            value=_names.get(_active, f"リスト{_active}"),
+            key=f"pl_name_{_active}",
+            placeholder="リスト名を入力...",
+            label_visibility="collapsed",
+        )
+        if _new_name and _new_name != _names.get(_active):
+            st.session_state.list_names[_active] = _new_name
+            save_state(_active)   # リスト名変更で自動保存
+    with _save_col:
+        if st.button("💾 保存", key="pl_save_btn", use_container_width=True):
+            save_state(_active)
+            st.toast(f"「{_names.get(_active)}」を保存しました ✅", icon="💾")
+    with _info_col:
+        # 他リストの銘柄数をコンパクト表示
+        _summary_parts = []
+        for _lid2 in range(1, NUM_POS_LISTS + 1):
+            if _lid2 == _active:
+                continue
+            _d2 = load_state(_lid2)
+            if _d2 and _d2.get("df_records"):
+                _cnt = sum(1 for r in _d2["df_records"] if r.get("銘柄コード"))
+                if _cnt > 0:
+                    _n2 = _d2.get("name", f"リスト{_lid2}")
+                    _summary_parts.append(f"{_n2}: {_cnt}銘柄")
+        if _summary_parts:
+            st.caption("他リスト: " + "　".join(_summary_parts))
+
+    st.divider()
+
+    # ════════════════════════════════════════════════════════════════════════
+    # ▼ 以下は既存のポジション表示・設定
+    # ════════════════════════════════════════════════════════════════════════
     n_rows = st.session_state.n_rows
 
     total_purchase = float(st.session_state.df["購入価格(円)"].dropna().sum())
@@ -882,15 +982,12 @@ def render_position_tab() -> None:
         for i in range(n_rows):
             if recalc_row(i, capital, risk_pct, losscut_mult):
                 needs_rerun = True
+        save_state()   # パラメータ変更で自動保存
 
-    btn1, btn2, _ = st.columns([0.12, 0.12, 0.76])
+    btn1, _ = st.columns([0.12, 0.88])
     with btn1:
         if st.button("➕ 行追加", use_container_width=True):
-            add_row(); st.rerun()
-    with btn2:
-        if st.button("💾 保存", use_container_width=True):
-            save_state()
-            st.toast("保存しました ✅", icon="💾")
+            add_row(); save_state(); st.rerun()
 
     st.divider()
     col_tbl, col_up, col_dn, col_clr, col_del = st.columns([0.81, 0.0475, 0.0475, 0.0475, 0.0475])
@@ -923,22 +1020,22 @@ def render_position_tab() -> None:
         st.markdown(spacer, unsafe_allow_html=True)
         for i in range(n_rows):
             if st.button("↑", key=f"up_{i}", use_container_width=True, disabled=(i == 0)):
-                move_row(i, -1); st.rerun()
+                move_row(i, -1); save_state(); st.rerun()
     with col_dn:
         st.markdown(spacer, unsafe_allow_html=True)
         for i in range(n_rows):
             if st.button("↓", key=f"dn_{i}", use_container_width=True, disabled=(i == n_rows - 1)):
-                move_row(i, 1); st.rerun()
+                move_row(i, 1); save_state(); st.rerun()
     with col_clr:
         st.markdown(spacer, unsafe_allow_html=True)
         for i in range(n_rows):
             if st.button("Clear", key=f"clr_{i}", use_container_width=True):
-                clear_row(i); st.rerun()
+                clear_row(i); save_state(); st.rerun()
     with col_del:
         st.markdown(spacer, unsafe_allow_html=True)
         for i in range(n_rows):
             if st.button("🗑️", key=f"del_{i}", use_container_width=True):
-                delete_row(i); st.rerun()
+                delete_row(i); save_state(); st.rerun()
 
     for i in range(n_rows):
         row = edited.iloc[i]
@@ -981,6 +1078,7 @@ def render_position_tab() -> None:
                 st.session_state.fx_rates[i] = 1.0
 
             st.session_state.prev_tickers[i] = new_ticker
+            save_state()   # ティッカー変更で自動保存
             needs_rerun = True
         elif new_ticker:
             if recalc_row(i, capital, risk_pct, losscut_mult):
