@@ -1434,59 +1434,51 @@ def render_position_tab() -> None:
         st.markdown("#### 📊 評価損益")
 
         _pnl_df = pd.DataFrame(_pnl_rows)
-        _color_scale = alt.Scale(
-            domain=["含み益", "含み損"],
-            range=["#16a34a", "#dc2626"],
-        )
-        _bar_h = max(180, len(_pnl_df) * 38 + 40)
+        _bar_h = max(200, len(_pnl_df) * 40 + 60)
 
-        # 損益額グラフ
-        _base_amt = alt.Chart(_pnl_df).mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
-            x=alt.X("損益額:Q", title="損益額（円）",
-                    axis=alt.Axis(format="¥,.0f", labelAngle=0)),
-            y=alt.Y("銘柄:N", sort=alt.EncodingSortField("損益額", order="descending"),
-                    title=None, axis=alt.Axis(labelLimit=200)),
-            color=alt.Color("種別:N", scale=_color_scale,
-                            legend=alt.Legend(title="", orient="top")),
-            tooltip=[
-                alt.Tooltip("銘柄:N", title="銘柄"),
-                alt.Tooltip("損益額ラベル:N", title="損益額"),
-                alt.Tooltip("損益率ラベル:N", title="損益率"),
-            ],
-        )
-        _rule_amt = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
-            color="#374151", strokeWidth=1
-        ).encode(x="x:Q")
-        _chart_amt = (_base_amt + _rule_amt).properties(
-            title="損益額", height=_bar_h
-        )
+        try:
+            # 損益額グラフ
+            _amt_sorted = _pnl_df.sort_values("損益額", ascending=True)
+            _chart_amt = alt.Chart(_amt_sorted).mark_bar().encode(
+                x=alt.X("損益額:Q", title="損益額（円）"),
+                y=alt.Y("銘柄:N", sort=list(_amt_sorted["銘柄"]), title=None),
+                color=alt.condition(
+                    alt.datum["損益額"] >= 0,
+                    alt.value("#16a34a"),
+                    alt.value("#dc2626"),
+                ),
+                tooltip=[
+                    alt.Tooltip("銘柄:N", title="銘柄"),
+                    alt.Tooltip("損益額ラベル:N", title="損益額"),
+                    alt.Tooltip("損益率ラベル:N", title="損益率"),
+                ],
+            ).properties(title="損益額（円）", height=_bar_h)
 
-        # 損益率グラフ
-        _base_pct = alt.Chart(_pnl_df).mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
-            x=alt.X("損益率:Q", title="損益率（%）",
-                    axis=alt.Axis(format="+.2f", labelAngle=0)),
-            y=alt.Y("銘柄:N", sort=alt.EncodingSortField("損益率", order="descending"),
-                    title=None, axis=alt.Axis(labelLimit=200)),
-            color=alt.Color("種別:N", scale=_color_scale, legend=None),
-            tooltip=[
-                alt.Tooltip("銘柄:N", title="銘柄"),
-                alt.Tooltip("損益率ラベル:N", title="損益率"),
-                alt.Tooltip("損益額ラベル:N", title="損益額"),
-            ],
-        )
-        _rule_pct = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
-            color="#374151", strokeWidth=1
-        ).encode(x="x:Q")
-        _chart_pct = (_base_pct + _rule_pct).properties(
-            title="損益率（%）", height=_bar_h
-        )
+            # 損益率グラフ
+            _pct_sorted = _pnl_df.sort_values("損益率", ascending=True)
+            _chart_pct = alt.Chart(_pct_sorted).mark_bar().encode(
+                x=alt.X("損益率:Q", title="損益率（%）"),
+                y=alt.Y("銘柄:N", sort=list(_pct_sorted["銘柄"]), title=None),
+                color=alt.condition(
+                    alt.datum["損益率"] >= 0,
+                    alt.value("#16a34a"),
+                    alt.value("#dc2626"),
+                ),
+                tooltip=[
+                    alt.Tooltip("銘柄:N", title="銘柄"),
+                    alt.Tooltip("損益率ラベル:N", title="損益率"),
+                    alt.Tooltip("損益額ラベル:N", title="損益額"),
+                ],
+            ).properties(title="損益率（%）", height=_bar_h)
 
-        st.altair_chart(
-            alt.hconcat(_chart_amt, _chart_pct).configure_view(strokeWidth=0)
-            .configure_axis(grid=True, gridColor="#f1f5f9")
-            .configure_title(fontSize=13, fontWeight=600, color="#374151"),
-            use_container_width=True,
-        )
+            _col_l, _col_r = st.columns(2)
+            with _col_l:
+                st.altair_chart(_chart_amt, use_container_width=True)
+            with _col_r:
+                st.altair_chart(_chart_pct, use_container_width=True)
+
+        except Exception as _chart_err:
+            st.warning(f"グラフ描画エラー: {_chart_err}")
 
 
 def render_screener_tab() -> None:
