@@ -117,6 +117,24 @@ READONLY_COLS = [
     "評価損益率(%)", "評価損益額(円)",
 ]
 
+# 列の表示名デフォルト（ユーザーがカスタマイズ可能）
+DEFAULT_COL_LABELS: dict[str, str] = {
+    "銘柄コード":     "銘柄コード",
+    "銘柄名":         "銘柄名",
+    "前日終値":       "前日終値",
+    "ATR":            "ATR(20日)",
+    "ユニットサイズ": "ユニットサイズ",
+    "保有株数":       "保有株数",
+    "1日のリスク":    "1日のリスク",
+    "建玉時株価":     "建玉時株価",
+    "売買":           "売買",
+    "ロスカットライン": "ロスカットライン",
+    "購入価格(円)":   "購入価格(円)",
+    "購入価格(USD)":  "購入価格(USD)",
+    "評価損益率(%)":  "損益率(%)",
+    "評価損益額(円)": "評価損益(円)",
+}
+
 NUMERIC_COLS = [
     "前日終値", "ATR", "ユニットサイズ", "保有株数", "1日のリスク",
     "建玉時株価", "ロスカットライン", "購入価格(円)", "購入価格(USD)",
@@ -219,6 +237,7 @@ def save_state(list_id: int | None = None) -> None:
         "theoretical_prices": _tp.get("prices", {}),
         "theoretical_at":     _tp.get("calculated_at", ""),
         "col_order":          st.session_state.get(f"col_order_{list_id}", []),
+        "col_labels":         st.session_state.get("pos_col_labels", {}),
     }
     with open(_list_save_file(list_id), "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
@@ -271,6 +290,10 @@ def _load_list_into_state(list_id: int) -> None:
         _saved_col_order = saved.get("col_order", [])
         if _saved_col_order:
             st.session_state[f"col_order_{list_id}"] = _saved_col_order
+        # 保存された列名を復元
+        _saved_col_labels = saved.get("col_labels", {})
+        if _saved_col_labels:
+            st.session_state["pos_col_labels"] = _saved_col_labels
         # 保存された理論株価キャッシュを復元
         _saved_tp = saved.get("theoretical_prices", {})
         _saved_tp_at = saved.get("theoretical_at", "")
@@ -1165,6 +1188,35 @@ def render_position_tab() -> None:
                 save_state(_active)
                 st.rerun()
 
+    # ── 列名カスタマイズパネル ────────────────────────────────────────────
+    _col_labels = {**DEFAULT_COL_LABELS, **st.session_state.get("pos_col_labels", {})}
+    with st.expander("✏️ 列名のカスタマイズ", expanded=False):
+        st.caption("各列の表示名を自由に変更できます。「💾 保存」でリロード後も維持されます。")
+        _nl_cols = list(DEFAULT_COL_LABELS.keys())
+        _nl_rows = [_nl_cols[i:i+3] for i in range(0, len(_nl_cols), 3)]
+        _new_labels: dict[str, str] = {}
+        for _nl_row in _nl_rows:
+            _nl_cs = st.columns(3)
+            for _nlc, _col_key in zip(_nl_cs, _nl_row):
+                _new_labels[_col_key] = _nlc.text_input(
+                    f"「{_col_key}」の表示名",
+                    value=_col_labels.get(_col_key, DEFAULT_COL_LABELS[_col_key]),
+                    key=f"colname_{_col_key}_{_active}",
+                    label_visibility="visible",
+                )
+        _cnl1, _cnl2 = st.columns([0.2, 0.8])
+        with _cnl1:
+            if st.button("💾 保存", key=f"save_col_labels_{_active}", use_container_width=True):
+                st.session_state["pos_col_labels"] = _new_labels
+                save_state(_active)
+                st.success("列名を保存しました")
+                st.rerun()
+        with _cnl2:
+            if st.button("↩️ デフォルトに戻す", key=f"reset_col_labels_{_active}", use_container_width=True):
+                st.session_state["pos_col_labels"] = {}
+                save_state(_active)
+                st.rerun()
+
     # 表示に使う列順（保存済みまたはデフォルト）
     _display_col_order = st.session_state.get(_col_order_key, _all_df_cols)
     _display_col_order = [c for c in _display_col_order if c in _all_df_cols]
@@ -1179,20 +1231,20 @@ def render_position_tab() -> None:
             st.session_state.df,
             column_order=_display_col_order,
             column_config={
-                "銘柄コード":     st.column_config.TextColumn("銘柄コード",     width="small"),
-                "銘柄名":         st.column_config.TextColumn("銘柄名",         width="medium"),
-                "前日終値":       st.column_config.NumberColumn("前日終値",      format="%.2f",   width="small"),
-                "ATR":            st.column_config.NumberColumn("ATR(20日)",     format="%.2f",   width="small"),
-                "ユニットサイズ": st.column_config.NumberColumn("ユニットサイズ",format="%.1f",   width="small"),
-                "保有株数":       st.column_config.NumberColumn("保有株数",      format="%.0f",   width="small"),
-                "1日のリスク":    st.column_config.NumberColumn("1日のリスク",   format="%.2f",   width="small"),
-                "建玉時株価":     st.column_config.NumberColumn("建玉時株価",    format="%.2f",   width="small"),
-                "売買":           st.column_config.SelectboxColumn("売買", options=["買い","売り"], width="small"),
-                "ロスカットライン": st.column_config.NumberColumn("ロスカットライン", format="%.2f", width="small"),
-                "購入価格(円)":   st.column_config.NumberColumn("購入価格(円)",  format="¥%.0f", width="small"),
-                "購入価格(USD)":  st.column_config.NumberColumn("購入価格(USD)", format="$%.2f", width="small"),
-                "評価損益率(%)":  st.column_config.NumberColumn("損益率(%)",     format="%.2f%%", width="small"),
-                "評価損益額(円)": st.column_config.NumberColumn("評価損益(円)",  format="¥%.0f", width="small"),
+                "銘柄コード":     st.column_config.TextColumn(_col_labels["銘柄コード"],     width="small"),
+                "銘柄名":         st.column_config.TextColumn(_col_labels["銘柄名"],         width="medium"),
+                "前日終値":       st.column_config.NumberColumn(_col_labels["前日終値"],      format="%.2f",   width="small"),
+                "ATR":            st.column_config.NumberColumn(_col_labels["ATR"],           format="%.2f",   width="small"),
+                "ユニットサイズ": st.column_config.NumberColumn(_col_labels["ユニットサイズ"],format="%.1f",   width="small"),
+                "保有株数":       st.column_config.NumberColumn(_col_labels["保有株数"],      format="%.0f",   width="small"),
+                "1日のリスク":    st.column_config.NumberColumn(_col_labels["1日のリスク"],   format="%.2f",   width="small"),
+                "建玉時株価":     st.column_config.NumberColumn(_col_labels["建玉時株価"],    format="%.2f",   width="small"),
+                "売買":           st.column_config.SelectboxColumn(_col_labels["売買"],       options=["買い","売り"], width="small"),
+                "ロスカットライン": st.column_config.NumberColumn(_col_labels["ロスカットライン"], format="%.2f", width="small"),
+                "購入価格(円)":   st.column_config.NumberColumn(_col_labels["購入価格(円)"],  format="¥%.0f", width="small"),
+                "購入価格(USD)":  st.column_config.NumberColumn(_col_labels["購入価格(USD)"], format="$%.2f", width="small"),
+                "評価損益率(%)":  st.column_config.NumberColumn(_col_labels["評価損益率(%)"], format="%.2f%%", width="small"),
+                "評価損益額(円)": st.column_config.NumberColumn(_col_labels["評価損益額(円)"],format="¥%.0f", width="small"),
             },
             disabled=READONLY_COLS,
             use_container_width=True,
@@ -1330,54 +1382,102 @@ def render_position_tab() -> None:
         st.rerun()
 
     # ════════════════════════════════════════════════════════════════════════
-    # ▼ 評価損益サマリー（色付きテーブル）
+    # ▼ 評価損益 棒グラフ
     # ════════════════════════════════════════════════════════════════════════
     _pnl_rows = []
     for _i in range(n_rows):
         _code = str(st.session_state.df.at[_i, "銘柄コード"] or "").strip()
         if not _code:
             continue
+        _r_val = st.session_state.df.at[_i, "評価損益率(%)"]
+        _a_val = st.session_state.df.at[_i, "評価損益額(円)"]
+        try:
+            _r_f = float(_r_val) if pd.notna(_r_val) else None
+        except Exception:
+            _r_f = None
+        try:
+            _a_f = float(_a_val) if pd.notna(_a_val) else None
+        except Exception:
+            _a_f = None
+        if _r_f is None and _a_f is None:
+            continue   # 損益データなしの行はスキップ
+        _name = str(st.session_state.df.at[_i, "銘柄名"] or "")
         _pnl_rows.append({
-            "銘柄コード": _code,
-            "銘柄名":     str(st.session_state.df.at[_i, "銘柄名"] or ""),
-            "損益率(%)":  st.session_state.df.at[_i, "評価損益率(%)"],
-            "損益額(円)": st.session_state.df.at[_i, "評価損益額(円)"],
+            "銘柄":    _code.replace(".T", "") + ("  " + _name[:8] if _name else ""),
+            "損益率": _r_f if _r_f is not None else 0.0,
+            "損益額": _a_f if _a_f is not None else 0.0,
+            "種別":   "含み益" if (_a_f or 0) >= 0 else "含み損",
+            "損益率ラベル": f"{_r_f:+.2f}%" if _r_f is not None else "—",
+            "損益額ラベル": f"¥{_a_f:+,.0f}" if _a_f is not None else "—",
         })
 
     if _pnl_rows:
+        import altair as alt
         st.divider()
         st.markdown("#### 📊 評価損益")
+
         _pnl_df = pd.DataFrame(_pnl_rows)
-        for _col in ["損益率(%)", "損益額(円)"]:
-            _pnl_df[_col] = pd.to_numeric(_pnl_df[_col], errors="coerce")
+        _color_scale = alt.Scale(
+            domain=["含み益", "含み損"],
+            range=["#16a34a", "#dc2626"],
+        )
+        _bar_h = max(180, len(_pnl_df) * 38 + 40)
 
-        def _pnl_cell_color(val):
-            try:
-                if pd.isna(val):
-                    return ""
-            except Exception:
-                return ""
-            return "color: #16a34a; font-weight: 600" if float(val) >= 0 else "color: #dc2626; font-weight: 600"
+        # 損益額グラフ
+        _base_amt = alt.Chart(_pnl_df).mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
+            x=alt.X("損益額:Q", title="損益額（円）",
+                    axis=alt.Axis(format="¥,.0f", labelAngle=0)),
+            y=alt.Y("銘柄:N", sort=alt.EncodingSortField("損益額", order="descending"),
+                    title=None, axis=alt.Axis(labelLimit=200)),
+            color=alt.Color("種別:N", scale=_color_scale,
+                            legend=alt.Legend(title="", orient="top")),
+            tooltip=[
+                alt.Tooltip("銘柄:N", title="銘柄"),
+                alt.Tooltip("損益額ラベル:N", title="損益額"),
+                alt.Tooltip("損益率ラベル:N", title="損益率"),
+            ],
+        )
+        _text_amt = _base_amt.mark_text(align="left", dx=4, fontSize=11, color="#374151").encode(
+            text="損益額ラベル:N",
+            x=alt.X("損益額:Q"),
+        )
+        _rule_amt = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
+            color="#374151", strokeWidth=1
+        ).encode(x="x:Q")
+        _chart_amt = (_base_amt + _text_amt + _rule_amt).properties(
+            title="損益額", height=_bar_h
+        )
 
-        def _fmt_pct(v):
-            try:
-                return f"{float(v):+.2f}%" if pd.notna(v) else "—"
-            except Exception:
-                return "—"
+        # 損益率グラフ
+        _base_pct = alt.Chart(_pnl_df).mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3).encode(
+            x=alt.X("損益率:Q", title="損益率（%）",
+                    axis=alt.Axis(format="+.2f", labelAngle=0)),
+            y=alt.Y("銘柄:N", sort=alt.EncodingSortField("損益率", order="descending"),
+                    title=None, axis=alt.Axis(labelLimit=200)),
+            color=alt.Color("種別:N", scale=_color_scale, legend=None),
+            tooltip=[
+                alt.Tooltip("銘柄:N", title="銘柄"),
+                alt.Tooltip("損益率ラベル:N", title="損益率"),
+                alt.Tooltip("損益額ラベル:N", title="損益額"),
+            ],
+        )
+        _text_pct = _base_pct.mark_text(align="left", dx=4, fontSize=11, color="#374151").encode(
+            text="損益率ラベル:N",
+            x=alt.X("損益率:Q"),
+        )
+        _rule_pct = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
+            color="#374151", strokeWidth=1
+        ).encode(x="x:Q")
+        _chart_pct = (_base_pct + _text_pct + _rule_pct).properties(
+            title="損益率（%）", height=_bar_h
+        )
 
-        def _fmt_yen(v):
-            try:
-                return f"¥{float(v):+,.0f}" if pd.notna(v) else "—"
-            except Exception:
-                return "—"
-
-        _style_obj = _pnl_df.style.format({"損益率(%)": _fmt_pct, "損益額(円)": _fmt_yen})
-        # pandas 2.1+ は map、旧版は applymap
-        try:
-            _style_obj = _style_obj.map(_pnl_cell_color, subset=["損益率(%)", "損益額(円)"])
-        except AttributeError:
-            _style_obj = _style_obj.applymap(_pnl_cell_color, subset=["損益率(%)", "損益額(円)"])
-        st.dataframe(_style_obj, use_container_width=True, hide_index=True)
+        st.altair_chart(
+            alt.hconcat(_chart_amt, _chart_pct).configure_view(strokeWidth=0)
+            .configure_axis(grid=True, gridColor="#f1f5f9")
+            .configure_title(fontSize=13, fontWeight=600, color="#374151"),
+            use_container_width=True,
+        )
 
 
 def render_screener_tab() -> None:
