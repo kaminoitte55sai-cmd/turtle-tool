@@ -239,8 +239,15 @@ def save_state(list_id: int | None = None) -> None:
         "col_order":          st.session_state.get(f"col_order_{list_id}", []),
         "col_labels":         st.session_state.get("pos_col_labels", {}),
     }
-    with open(_list_save_file(list_id), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False)
+    _json_bytes = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    with open(_list_save_file(list_id), "wb") as f:
+        f.write(_json_bytes)
+    # GitHub にも書き戻す（Streamlit Cloud のエフェメラルストレージ対策）
+    _push_to_github(
+        f"pos_list_{list_id}.json",
+        _json_bytes,
+        f"Update position list {list_id}",
+    )
 
 
 def load_state(list_id: int | None = None) -> dict | None:
@@ -252,6 +259,16 @@ def load_state(list_id: int | None = None) -> dict | None:
     if not os.path.exists(path) and list_id == 1 and os.path.exists(SAVE_FILE):
         path = SAVE_FILE
     if not os.path.exists(path):
+        # ローカルにない場合は GitHub から取得を試みる
+        _gh_data = _pull_from_github(f"pos_list_{list_id}.json")
+        if _gh_data:
+            # ローカルにキャッシュしておく
+            try:
+                with open(path, "w", encoding="utf-8") as _f:
+                    json.dump(_gh_data, _f, ensure_ascii=False)
+            except Exception:
+                pass
+            return _gh_data
         return None
     try:
         with open(path, encoding="utf-8") as f:
@@ -1437,14 +1454,10 @@ def render_position_tab() -> None:
                 alt.Tooltip("損益率ラベル:N", title="損益率"),
             ],
         )
-        _text_amt = _base_amt.mark_text(align="left", dx=4, fontSize=11, color="#374151").encode(
-            text="損益額ラベル:N",
-            x=alt.X("損益額:Q"),
-        )
         _rule_amt = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
             color="#374151", strokeWidth=1
         ).encode(x="x:Q")
-        _chart_amt = (_base_amt + _text_amt + _rule_amt).properties(
+        _chart_amt = (_base_amt + _rule_amt).properties(
             title="損益額", height=_bar_h
         )
 
@@ -1461,14 +1474,10 @@ def render_position_tab() -> None:
                 alt.Tooltip("損益額ラベル:N", title="損益額"),
             ],
         )
-        _text_pct = _base_pct.mark_text(align="left", dx=4, fontSize=11, color="#374151").encode(
-            text="損益率ラベル:N",
-            x=alt.X("損益率:Q"),
-        )
         _rule_pct = alt.Chart(pd.DataFrame({"x": [0]})).mark_rule(
             color="#374151", strokeWidth=1
         ).encode(x="x:Q")
-        _chart_pct = (_base_pct + _text_pct + _rule_pct).properties(
+        _chart_pct = (_base_pct + _rule_pct).properties(
             title="損益率（%）", height=_bar_h
         )
 
@@ -2872,6 +2881,28 @@ def _push_to_github(repo_path: str, content_bytes: bytes, commit_msg: str = "Upd
         return _r2.status_code in (200, 201)
     except Exception:
         return False
+
+
+def _pull_from_github(repo_path: str) -> dict | None:
+    """GitHub API からファイルを取得して JSON として返す。
+    GITHUB_TOKEN が未設定 or ファイルが存在しない場合は None を返す。
+    """
+    import base64 as _b64
+    if not GITHUB_TOKEN:
+        return None
+    _api = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{repo_path}"
+    _hdrs = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    try:
+        _r = _req.get(_api, headers=_hdrs, timeout=10)
+        if _r.status_code == 200:
+            _content = _b64.b64decode(_r.json()["content"]).decode("utf-8")
+            return json.loads(_content)
+    except Exception:
+        pass
+    return None
 
 
 def save_funda_data(df: pd.DataFrame) -> None:
