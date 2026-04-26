@@ -258,31 +258,34 @@ def logout_account(username: str) -> None:
     _run(_do())
 
 
-# ── ユーザー情報取得 ──────────────────────────────────────────────────────────
-
-async def _aadd_user(username: str) -> dict:
-    from twscrape import API  # type: ignore
-    api = API(_TW_ACCT_DB)
-    username = username.lstrip("@").strip()
-    user = await api.user_by_login(username)
-    if not user:
-        raise ValueError(f"ユーザー @{username} が見つかりません")
-    display_name = user.displayname or username
-    user_id      = str(user.id)
-    with _db() as conn:
-        conn.execute("""
-            INSERT INTO x_users(username, display_name, user_id, is_active)
-            VALUES(?,?,?,1)
-            ON CONFLICT(username) DO UPDATE SET
-                display_name = excluded.display_name,
-                user_id      = excluded.user_id,
-                is_active    = 1
-        """, (username, display_name, user_id))
-    return {"username": username, "display_name": display_name, "user_id": user_id}
-
+# ── ユーザー追加（API呼び出しなし・即時保存）─────────────────────────────────
 
 def add_user(username: str) -> dict:
-    return _run(_aadd_user(username))
+    """ユーザーをDBに追加（user_idはツイート取得時に自動解決）"""
+    username = username.lstrip("@").strip()
+    if not username:
+        raise ValueError("ユーザー名を入力してください")
+    with _db() as conn:
+        conn.execute("""
+            INSERT INTO x_users(username, is_active)
+            VALUES(?,1)
+            ON CONFLICT(username) DO UPDATE SET is_active=1
+        """, (username,))
+    return {"username": username, "display_name": username, "user_id": None}
+
+
+async def _aresolve_user_id(api, username: str) -> tuple[str, str]:
+    """user_id と display_name を X API で解決してDBに保存"""
+    user = await api.user_by_login(username)
+    if not user:
+        raise ValueError(f"ユーザー @{username} が見つかりません（アカウント非公開または存在しない可能性があります）")
+    user_id      = str(user.id)
+    display_name = user.displayname or username
+    with _db() as conn:
+        conn.execute("""
+            UPDATE x_users SET user_id=?, display_name=? WHERE username=?
+        """, (user_id, display_name, username))
+    return user_id, display_name
 
 
 def remove_user(username: str) -> None:
@@ -344,18 +347,20 @@ def _calc_score(like: int, rt: int, reply: int, text: str) -> float:
 # ツイート取得メイン
 # ═══════════════════════════════════════════════════════════════════════════════
 
-async def _afetch_user(user: dict, noise: list[str]) -> dict:
+async def _afetch_user(user: dict, noise: list[str], api) -> dict:
     """1ユーザー分のツイートを差分取得してDBへ保存"""
-    from twscrape import API  # type: ignore
-    api       = API(_TW_ACCT_DB)
     uname     = user["username"]
     uid_str   = user.get("user_id")
     since_id  = user.get("last_tweet_id")
     new_count = 0
     latest_id: Optional[str] = since_id
 
+    # user_id 未解決の場合はここで解決
     if not uid_str:
-        return {"error": "user_id 未取得。ユーザーを再追加してください。"}
+        try:
+            uid_str, display_name = await _aresolve_user_id(api, uname)
+        except Exception as e:
+            return {"error": str(e)}
 
     uid = int(uid_str)
     try:
@@ -429,12 +434,14 @@ async def _afetch_user(user: dict, noise: list[str]) -> dict:
 
 
 async def _afetch_all() -> dict[str, dict]:
+    from twscrape import API  # type: ignore
     init_db()
+    api   = API(_TW_ACCT_DB)
     users = get_users()
     noise = _get_noise_words()
     results: dict[str, dict] = {}
     for user in users:
-        results[user["username"]] = await _afetch_user(user, noise)
+        results[user["username"]] = await _afetch_user(user, noise, api)
     return results
 
 
