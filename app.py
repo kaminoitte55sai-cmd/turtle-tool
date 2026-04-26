@@ -9,6 +9,7 @@ Streamlit UI（タブ構成）
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import math
 import os
@@ -6913,17 +6914,21 @@ def render_x_analysis_tab() -> None:
             use_container_width=True, type="primary",
             disabled=(not _logged_in or not _users),
         ):
-            with st.spinner("投稿を取得中...（数十秒かかる場合があります）"):
-                try:
-                    _results = xc.fetch_all_users()
-                    for _uname, _res in _results.items():
-                        if "error" in _res:
-                            st.error(f"@{_uname}: {_res['error']}")
-                        else:
-                            st.success(f"@{_uname}: +{_res['new_count']} 件")
-                    st.rerun()
-                except Exception as _e:
-                    st.error(f"取得エラー: {_e}")
+            _fetch_placeholder = st.empty()
+            _fetch_placeholder.info("取得中... しばらくお待ちください")
+            try:
+                _results = xc.fetch_all_users()
+                _fetch_placeholder.empty()
+                for _uname, _res in _results.items():
+                    if "error" in _res:
+                        st.error(f"@{_uname}: {_res['error']}")
+                    else:
+                        st.success(f"@{_uname}: +{_res['new_count']} 件取得")
+                st.rerun()
+            except concurrent.futures.TimeoutError:
+                _fetch_placeholder.error("タイムアウト（120秒）。Xのレート制限の可能性があります。しばらく待ってから再試行してください。")
+            except Exception as _e:
+                _fetch_placeholder.error(f"取得エラー: {_e}")
 
         st.divider()
 

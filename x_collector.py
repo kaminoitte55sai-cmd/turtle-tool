@@ -16,6 +16,7 @@ x_fetch_log     : 取得履歴ログ
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import re
 import sqlite3
@@ -125,24 +126,14 @@ def init_db() -> None:
 # twscrape ヘルパー（非同期→同期ラッパー）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _run(coro):
-    """asyncio コルーチンを同期的に実行するユーティリティ"""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Jupyter / Streamlit の既存ループ内では nest_asyncio が必要
-            import nest_asyncio  # type: ignore
-            nest_asyncio.apply()
-            return loop.run_until_complete(coro)
-        return loop.run_until_complete(coro)
-    except RuntimeError:
+def _run(coro, timeout: int = 120):
+    """asyncio コルーチンを別スレッドで実行（Streamlit のイベントループと干渉しない）"""
+    def _worker():
         return asyncio.run(coro)
 
-
-def _tw_api():
-    """twscrape API インスタンスを返す"""
-    from twscrape import API  # type: ignore
-    return API(_TW_ACCT_DB)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(_worker)
+        return future.result(timeout=timeout)
 
 
 # ── アカウントログイン ─────────────────────────────────────────────────────────
@@ -347,6 +338,16 @@ def _calc_score(like: int, rt: int, reply: int, text: str) -> float:
 # ツイート取得メイン
 # ═══════════════════════════════════════════════════════════════════════════════
 
+async def _acollect_tweets(api, uid: int, limit: int = 100) -> list:
+    """非同期ジェネレータからツイートをリストに収集（タイムアウト付き）"""
+    tweets = []
+    async for tw in api.user_tweets(uid, limit=limit):
+        tweets.append(tw)
+        if len(tweets) >= limit:
+            break
+    return tweets
+
+
 async def _afetch_user(user: dict, noise: list[str], api) -> dict:
     """1ユーザー分のツイートを差分取得してDBへ保存"""
     uname     = user["username"]
@@ -355,66 +356,77 @@ async def _afetch_user(user: dict, noise: list[str], api) -> dict:
     new_count = 0
     latest_id: Optional[str] = since_id
 
-    # user_id 未解決の場合はここで解決
+    # user_id 未解決の場合はここで解決（タイムアウト30秒）
     if not uid_str:
         try:
-            uid_str, display_name = await _aresolve_user_id(api, uname)
+            uid_str, _ = await asyncio.wait_for(
+                _aresolve_user_id(api, uname), timeout=30
+            )
+        except asyncio.TimeoutError:
+            return {"error": f"@{uname} のユーザーID取得がタイムアウトしました（30秒）"}
         except Exception as e:
             return {"error": str(e)}
 
     uid = int(uid_str)
+
+    # ツイート収集（タイムアウト60秒）
     try:
-        async for tw in api.user_tweets(uid, limit=100):
-            tid = str(tw.id)
-
-            # 差分チェック（since_id より古いものはスキップ）
-            if since_id and tid <= since_id:
-                continue
-
-            # リツイート除外（twscrape の user_tweets は exclude RT 対応済みだが念のため）
-            if tw.retweetedTweet is not None:
-                continue
-
-            text    = tw.rawContent or ""
-            created = tw.date.isoformat() if tw.date else ""
-
-            # フィルタリング
-            if len(text) < _MIN_TEXT_LEN:
-                continue
-            if _is_noisy(text, noise):
-                continue
-
-            likes  = tw.likeCount    or 0
-            rts    = tw.retweetCount or 0
-            reps   = tw.replyCount   or 0
-            quotes = tw.quoteCount   or 0
-
-            with _db() as conn:
-                cur = conn.execute("""
-                    INSERT OR IGNORE INTO x_tweets(
-                        tweet_id, username, text, created_at,
-                        like_count, retweet_count, reply_count, quote_count
-                    ) VALUES(?,?,?,?,?,?,?,?)
-                """, (tid, uname, text, created, likes, rts, reps, quotes))
-                if cur.rowcount > 0:
-                    new_count += 1
-
-            # 銘柄メンション & スコア
-            codes = _extract_stock_codes(text)
-            score = _calc_score(likes, rts, reps, text)
-            for code in codes:
-                with _db() as conn:
-                    conn.execute("""
-                        INSERT OR IGNORE INTO x_stock_mentions(
-                            tweet_id, stock_code, score, mentioned_at
-                        ) VALUES(?,?,?,?)
-                    """, (tid, code, score, created))
-
-            if latest_id is None or tid > latest_id:
-                latest_id = tid
-
+        raw_tweets = await asyncio.wait_for(
+            _acollect_tweets(api, uid, limit=100), timeout=60
+        )
+    except asyncio.TimeoutError:
+        return {"error": f"@{uname} のツイート取得がタイムアウトしました（60秒）"}
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": f"@{uname} 取得エラー: {e}"}
+
+    for tw in raw_tweets:
+        tid = str(tw.id)
+
+        # 差分チェック
+        if since_id and tid <= since_id:
+            continue
+
+        # リツイート除外
+        if tw.retweetedTweet is not None:
+            continue
+
+        text    = tw.rawContent or ""
+        created = tw.date.isoformat() if tw.date else ""
+
+        # フィルタリング
+        if len(text) < _MIN_TEXT_LEN:
+            continue
+        if _is_noisy(text, noise):
+            continue
+
+        likes  = tw.likeCount    or 0
+        rts    = tw.retweetCount or 0
+        reps   = tw.replyCount   or 0
+        quotes = tw.quoteCount   or 0
+
+        with _db() as conn:
+            cur = conn.execute("""
+                INSERT OR IGNORE INTO x_tweets(
+                    tweet_id, username, text, created_at,
+                    like_count, retweet_count, reply_count, quote_count
+                ) VALUES(?,?,?,?,?,?,?,?)
+            """, (tid, uname, text, created, likes, rts, reps, quotes))
+            if cur.rowcount > 0:
+                new_count += 1
+
+        # 銘柄メンション & スコア
+        codes = _extract_stock_codes(text)
+        score = _calc_score(likes, rts, reps, text)
+        for code in codes:
+            with _db() as conn:
+                conn.execute("""
+                    INSERT OR IGNORE INTO x_stock_mentions(
+                        tweet_id, stock_code, score, mentioned_at
+                    ) VALUES(?,?,?,?)
+                """, (tid, code, score, created))
+
+        if latest_id is None or tid > latest_id:
+            latest_id = tid
 
     # last_tweet_id 更新
     if latest_id and latest_id != since_id:
