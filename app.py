@@ -6827,31 +6827,29 @@ def render_x_analysis_tab() -> None:
                                 st.error(str(_e))
 
             with _login_tab_ck:
-                st.caption(
-                    "GoogleアカウントでXにログインしている場合はこちら。\n"
-                    "ブラウザの Cookie を貼り付けるだけでOKです。"
-                )
-                st.markdown(
-                    "**取得方法**: x.com をブラウザで開く → `F12` → "
-                    "**Application** → **Cookies** → **https://x.com** → "
-                    "`auth_token` と `ct0` の値をコピー",
-                    help="Chrome / Edge どちらでも同じ手順です",
-                )
+                st.caption("GoogleアカウントでXにログインしている場合はこちら。APIキー不要。")
+                with st.expander("📖 Cookie の取得方法", expanded=False):
+                    st.markdown("""
+1. Chrome で **x.com** を開きGoogleでログイン
+2. `F12` キー → **「Application」タブ**
+3. 左メニュー **「Cookies」→「https://x.com」**
+4. 一覧から `auth_token` と `ct0` を探して、**「Value」列**の値をコピー
+
+> `ct0` は最近128文字の長い形式になっています（正常です）
+                    """)
                 with st.form("x_login_form_ck"):
-                    _ck_user = st.text_input("Xユーザー名（@なし）", placeholder="username")
-                    _ck_val  = st.text_area(
-                        "Cookie 文字列",
-                        placeholder="auth_token=xxxxxxxx; ct0=yyyyyyyy",
-                        height=80,
-                    )
+                    _ck_user       = st.text_input("Xユーザー名（@なし）", placeholder="username")
+                    _ck_auth_token = st.text_input("auth_token", placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", type="password")
+                    _ck_ct0        = st.text_input("ct0", placeholder="99419d3b3f46fc69...", type="password")
                     _sub_ck = st.form_submit_button("Cookieでログイン", use_container_width=True, type="primary")
                 if _sub_ck:
-                    if not (_ck_user and _ck_val):
-                        st.error("ユーザー名と Cookie を入力してください")
+                    if not (_ck_user and _ck_auth_token and _ck_ct0):
+                        st.error("すべての項目を入力してください")
                     else:
+                        _cookie_str = f"auth_token={_ck_auth_token.strip()}; ct0={_ck_ct0.strip()}"
                         with st.spinner("Cookie でログイン中..."):
                             try:
-                                msg = xc.login_account_cookie(_ck_user, _ck_val)
+                                msg = xc.login_account_cookie(_ck_user, _cookie_str)
                                 st.success(msg)
                                 st.rerun()
                             except Exception as _e:
