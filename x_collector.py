@@ -151,18 +151,26 @@ async def _alogin(username: str, password: str, email: str) -> str:
     """Xアカウントでログインしてセッションを保存する"""
     from twscrape import API  # type: ignore
     api = API(_TW_ACCT_DB)
+    # email_password は 2FA 未使用なら空文字でOK
     await api.pool.add_account(
         username=username,
         password=password,
         email=email,
-        email_password="",   # メール2FA を使っていない場合は空文字でOK
+        email_password="",
     )
     await api.pool.login_all()
-    # ログイン済みアカウントを確認
+    # ログイン結果確認
     accounts = await api.pool.get_all()
     logged = [a for a in accounts if a.active]
     if not logged:
-        raise RuntimeError("ログインに失敗しました。ユーザー名・パスワード・メールを確認してください。")
+        # error_msg があれば表示
+        errs = [a.error_msg for a in accounts if a.error_msg]
+        detail = f"（{errs[0]}）" if errs else ""
+        raise RuntimeError(
+            f"ログインに失敗しました{detail}\n"
+            "・ユーザー名／パスワード／メールアドレスを確認してください\n"
+            "・Xの2段階認証（アプリ認証）が有効な場合は一時的に無効にしてください"
+        )
     return f"ログイン成功: @{logged[0].username}"
 
 
@@ -178,7 +186,7 @@ async def _aget_login_status() -> list[dict]:
         {
             "username": a.username,
             "active":   a.active,
-            "last_used": str(a.lastUsed)[:19] if a.lastUsed else "—",
+            "last_used": str(a.last_used)[:19] if a.last_used else "—",
         }
         for a in accounts
     ]
