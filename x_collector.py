@@ -147,11 +147,10 @@ def _tw_api():
 
 # ── アカウントログイン ─────────────────────────────────────────────────────────
 
-async def _alogin(username: str, password: str, email: str) -> str:
-    """Xアカウントでログインしてセッションを保存する"""
+async def _alogin_password(username: str, password: str, email: str) -> str:
+    """パスワードでログイン"""
     from twscrape import API  # type: ignore
     api = API(_TW_ACCT_DB)
-    # email_password は 2FA 未使用なら空文字でOK
     await api.pool.add_account(
         username=username,
         password=password,
@@ -159,23 +158,72 @@ async def _alogin(username: str, password: str, email: str) -> str:
         email_password="",
     )
     await api.pool.login_all()
-    # ログイン結果確認
     accounts = await api.pool.get_all()
     logged = [a for a in accounts if a.active]
     if not logged:
-        # error_msg があれば表示
         errs = [a.error_msg for a in accounts if a.error_msg]
         detail = f"（{errs[0]}）" if errs else ""
         raise RuntimeError(
             f"ログインに失敗しました{detail}\n"
             "・ユーザー名／パスワード／メールアドレスを確認してください\n"
-            "・Xの2段階認証（アプリ認証）が有効な場合は一時的に無効にしてください"
+            "・Googleアカウント連携の場合は「Cookieログイン」をお使いください"
         )
     return f"ログイン成功: @{logged[0].username}"
 
 
+async def _alogin_cookie(username: str, cookies: str) -> str:
+    """ブラウザCookieでログイン（Googleアカウント連携に対応）
+
+    cookies: "auth_token=xxx; ct0=yyy" 形式の文字列
+    """
+    from twscrape import API  # type: ignore
+    api = API(_TW_ACCT_DB)
+
+    # Cookie文字列をパース
+    cookie_dict: dict[str, str] = {}
+    for part in cookies.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            cookie_dict[k.strip()] = v.strip()
+
+    if "auth_token" not in cookie_dict:
+        raise ValueError("Cookie に auth_token が含まれていません。\nauth_token=xxx; ct0=yyy の形式で入力してください。")
+    if "ct0" not in cookie_dict:
+        raise ValueError("Cookie に ct0 が含まれていません。\nauth_token=xxx; ct0=yyy の形式で入力してください。")
+
+    # Cookie付きでアカウント登録（パスワード不要）
+    # username はダミーでも動くが、実際のIDを推奨
+    await api.pool.add_account(
+        username=username,
+        password="cookie_auth",       # Cookie認証時はパスワード不使用
+        email="cookie@example.com",   # Cookie認証時はメール不使用
+        email_password="",
+        cookies=cookies,
+    )
+
+    # login_all は Cookie があれば実際のログインをスキップする
+    await api.pool.login_all()
+
+    accounts = await api.pool.get_all()
+    logged = [a for a in accounts if a.active]
+    if not logged:
+        errs = [a.error_msg for a in accounts if a.error_msg]
+        detail = f"（{errs[0]}）" if errs else ""
+        raise RuntimeError(
+            f"Cookieログインに失敗しました{detail}\n"
+            "・auth_token と ct0 の値が正しいか確認してください\n"
+            "・Cookieの有効期限が切れていないか確認してください（再度ブラウザからコピーしてください）"
+        )
+    return f"Cookieログイン成功: @{logged[0].username}"
+
+
 def login_account(username: str, password: str, email: str) -> str:
-    return _run(_alogin(username, password, email))
+    return _run(_alogin_password(username, password, email))
+
+
+def login_account_cookie(username: str, cookies: str) -> str:
+    return _run(_alogin_cookie(username, cookies))
 
 
 async def _aget_login_status() -> list[dict]:

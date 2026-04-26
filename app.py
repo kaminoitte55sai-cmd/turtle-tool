@@ -6806,23 +6806,56 @@ def render_x_analysis_tab() -> None:
                     xc.logout_account(_acct["username"])
                 st.rerun()
         else:
-            st.info("Xアカウントでログインしてください（APIキー不要）")
-            with st.form("x_login_form"):
-                _xu = st.text_input("Xユーザー名", placeholder="username（@不要）")
-                _xp = st.text_input("パスワード", type="password")
-                _xe = st.text_input("登録メールアドレス", placeholder="example@mail.com")
-                _submitted = st.form_submit_button("ログイン", use_container_width=True, type="primary")
-            if _submitted:
-                if not (_xu and _xp and _xe):
-                    st.error("すべての項目を入力してください")
-                else:
-                    with st.spinner("ログイン中..."):
-                        try:
-                            msg = xc.login_account(_xu, _xp, _xe)
-                            st.success(msg)
-                            st.rerun()
-                        except Exception as _e:
-                            st.error(f"ログイン失敗: {_e}")
+            _login_tab_pw, _login_tab_ck = st.tabs(["パスワード", "Cookie（推奨）"])
+
+            with _login_tab_pw:
+                with st.form("x_login_form_pw"):
+                    _xu = st.text_input("Xユーザー名", placeholder="username（@不要）")
+                    _xp = st.text_input("パスワード", type="password")
+                    _xe = st.text_input("登録メールアドレス", placeholder="example@mail.com")
+                    _sub_pw = st.form_submit_button("ログイン", use_container_width=True, type="primary")
+                if _sub_pw:
+                    if not (_xu and _xp and _xe):
+                        st.error("すべての項目を入力してください")
+                    else:
+                        with st.spinner("ログイン中..."):
+                            try:
+                                msg = xc.login_account(_xu, _xp, _xe)
+                                st.success(msg)
+                                st.rerun()
+                            except Exception as _e:
+                                st.error(str(_e))
+
+            with _login_tab_ck:
+                st.caption(
+                    "GoogleアカウントでXにログインしている場合はこちら。\n"
+                    "ブラウザの Cookie を貼り付けるだけでOKです。"
+                )
+                st.markdown(
+                    "**取得方法**: x.com をブラウザで開く → `F12` → "
+                    "**Application** → **Cookies** → **https://x.com** → "
+                    "`auth_token` と `ct0` の値をコピー",
+                    help="Chrome / Edge どちらでも同じ手順です",
+                )
+                with st.form("x_login_form_ck"):
+                    _ck_user = st.text_input("Xユーザー名（@なし）", placeholder="username")
+                    _ck_val  = st.text_area(
+                        "Cookie 文字列",
+                        placeholder="auth_token=xxxxxxxx; ct0=yyyyyyyy",
+                        height=80,
+                    )
+                    _sub_ck = st.form_submit_button("Cookieでログイン", use_container_width=True, type="primary")
+                if _sub_ck:
+                    if not (_ck_user and _ck_val):
+                        st.error("ユーザー名と Cookie を入力してください")
+                    else:
+                        with st.spinner("Cookie でログイン中..."):
+                            try:
+                                msg = xc.login_account_cookie(_ck_user, _ck_val)
+                                st.success(msg)
+                                st.rerun()
+                            except Exception as _e:
+                                st.error(str(_e))
 
         st.divider()
 
