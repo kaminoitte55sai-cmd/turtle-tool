@@ -150,7 +150,10 @@ def _tw_api():
 async def _alogin_password(username: str, password: str, email: str) -> str:
     """パスワードでログイン"""
     from twscrape import API  # type: ignore
+    from twscrape.db import execute  # type: ignore
     api = API(_TW_ACCT_DB)
+    # 既存エントリを削除してから再登録
+    await execute(_TW_ACCT_DB, "DELETE FROM accounts WHERE username = :u", {"u": username})
     await api.pool.add_account(
         username=username,
         password=password,
@@ -177,9 +180,11 @@ async def _alogin_cookie(username: str, cookies: str) -> str:
     cookies: "auth_token=xxx; ct0=yyy" 形式の文字列
     """
     from twscrape import API  # type: ignore
-    api = API(_TW_ACCT_DB)
+    from twscrape.db import execute  # type: ignore
 
-    # Cookie文字列をパース
+    username = username.lstrip("@").strip()
+
+    # Cookie文字列の簡易バリデーション
     cookie_dict: dict[str, str] = {}
     for part in cookies.split(";"):
         part = part.strip()
@@ -188,32 +193,33 @@ async def _alogin_cookie(username: str, cookies: str) -> str:
             cookie_dict[k.strip()] = v.strip()
 
     if "auth_token" not in cookie_dict:
-        raise ValueError("Cookie に auth_token が含まれていません。\nauth_token=xxx; ct0=yyy の形式で入力してください。")
+        raise ValueError("auth_token が含まれていません。入力内容を確認してください。")
     if "ct0" not in cookie_dict:
-        raise ValueError("Cookie に ct0 が含まれていません。\nauth_token=xxx; ct0=yyy の形式で入力してください。")
+        raise ValueError("ct0 が含まれていません。入力内容を確認してください。")
 
-    # Cookie付きでアカウント登録（パスワード不要）
-    # username はダミーでも動くが、実際のIDを推奨
+    api = API(_TW_ACCT_DB)
+
+    # 既存エントリを削除（以前のログイン失敗が残っているとadd_accountがスキップされるため）
+    await execute(_TW_ACCT_DB, "DELETE FROM accounts WHERE username = :u", {"u": username})
+
+    # Cookie付きでアカウント登録
+    # ct0 が含まれていると twscrape が自動で active=True にセットする
     await api.pool.add_account(
         username=username,
-        password="cookie_auth",       # Cookie認証時はパスワード不使用
-        email="cookie@example.com",   # Cookie認証時はメール不使用
+        password="cookie_auth",
+        email="cookie@localhost",
         email_password="",
         cookies=cookies,
     )
 
-    # login_all は Cookie があれば実際のログインをスキップする
-    await api.pool.login_all()
-
+    # active=True になっているか確認（login_all は不要・呼ぶと逆効果）
     accounts = await api.pool.get_all()
-    logged = [a for a in accounts if a.active]
+    logged = [a for a in accounts if a.active and a.username == username]
     if not logged:
-        errs = [a.error_msg for a in accounts if a.error_msg]
-        detail = f"（{errs[0]}）" if errs else ""
         raise RuntimeError(
-            f"Cookieログインに失敗しました{detail}\n"
-            "・auth_token と ct0 の値が正しいか確認してください\n"
-            "・Cookieの有効期限が切れていないか確認してください（再度ブラウザからコピーしてください）"
+            "Cookieの設定に失敗しました。\n"
+            "・auth_token / ct0 の値をもう一度コピーし直してください\n"
+            "・ブラウザでx.comを開き直してから再取得してください"
         )
     return f"Cookieログイン成功: @{logged[0].username}"
 
