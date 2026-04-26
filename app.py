@@ -6778,81 +6778,86 @@ def main() -> None:
 
 
 def render_x_analysis_tab() -> None:
-    """Xユーザー 銘柄分析タブ"""
+    """Xユーザー 銘柄分析タブ（twscrape ベース・APIキー不要）"""
     import x_collector as xc
 
     st.title("🐦 Xユーザー 銘柄分析")
     xc.init_db()
 
-    # ── Bearer Token ──────────────────────────────────────────────────────────
-    _bearer_secret = st.secrets.get("X_BEARER_TOKEN", "")
-    if _bearer_secret:
-        _bearer = _bearer_secret
-    else:
-        _bearer = st.session_state.get("x_bearer_token", "")
-
     # ═══════════════════════════════════════════════════════════════════════════
-    # レイアウト: 左サイドバー（設定） | 右メイン（分析）
+    # レイアウト: 左（設定） | 右（分析）
     # ═══════════════════════════════════════════════════════════════════════════
     col_cfg, col_main = st.columns([1, 3], gap="large")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # 左列: 設定パネル
-    # ──────────────────────────────────────────────────────────────────────────
     with col_cfg:
         st.markdown("### ⚙️ 設定")
 
-        # Bearer Token 入力（secrets未設定の場合）
-        if not _bearer_secret:
-            _input_token = st.text_input(
-                "X Bearer Token",
-                value=_bearer,
-                type="password",
-                placeholder="AAA...XXX",
-                help="X Developer Portal で取得した Bearer Token",
-                key="x_bearer_input",
-            )
-            if _input_token != _bearer:
-                st.session_state["x_bearer_token"] = _input_token
-                _bearer = _input_token
+        # ── Xアカウントログイン ───────────────────────────────────────────────
+        st.markdown("#### 🔐 Xアカウント連携")
+
+        _login_status = xc.get_login_status()
+        _logged_in    = [a for a in _login_status if a["active"]]
+
+        if _logged_in:
+            for _acct in _logged_in:
+                st.success(f"ログイン済み: @{_acct['username']} ✅")
+            if st.button("🚪 ログアウト", key="x_logout_btn", use_container_width=True):
+                for _acct in _logged_in:
+                    xc.logout_account(_acct["username"])
+                st.rerun()
         else:
-            st.success("Bearer Token: secrets から読み込み済み ✅")
+            st.info("Xアカウントでログインしてください（APIキー不要）")
+            with st.form("x_login_form"):
+                _xu = st.text_input("Xユーザー名", placeholder="username（@不要）")
+                _xp = st.text_input("パスワード", type="password")
+                _xe = st.text_input("登録メールアドレス", placeholder="example@mail.com")
+                _submitted = st.form_submit_button("ログイン", use_container_width=True, type="primary")
+            if _submitted:
+                if not (_xu and _xp and _xe):
+                    st.error("すべての項目を入力してください")
+                else:
+                    with st.spinner("ログイン中..."):
+                        try:
+                            msg = xc.login_account(_xu, _xp, _xe)
+                            st.success(msg)
+                            st.rerun()
+                        except Exception as _e:
+                            st.error(f"ログイン失敗: {_e}")
 
         st.divider()
 
-        # ── ユーザー追加 ──────────────────────────────────────────────────────
+        # ── 追跡ユーザー ──────────────────────────────────────────────────────
         st.markdown("#### 👤 追跡ユーザー")
 
         _new_user = st.text_input(
             "Xユーザー名を追加", placeholder="@username",
             key="x_new_user_input",
         )
-        if st.button("➕ 追加", key="x_add_user_btn", use_container_width=True):
-            if not _bearer:
-                st.error("Bearer Token を入力してください")
-            elif not _new_user:
+        if st.button("➕ 追加", key="x_add_user_btn", use_container_width=True,
+                     disabled=not _logged_in):
+            if not _new_user:
                 st.error("ユーザー名を入力してください")
             else:
                 with st.spinner("ユーザー情報を取得中..."):
                     try:
-                        info = xc.add_user(_new_user, _bearer)
+                        info = xc.add_user(_new_user)
                         st.success(f"追加: @{info['username']} ({info['display_name']})")
                         st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
+                    except Exception as _e:
+                        st.error(str(_e))
 
-        # ユーザー一覧
         _users = xc.get_users()
         if _users:
             for _u in _users:
-                _ucol1, _ucol2 = st.columns([3, 1])
-                with _ucol1:
+                _uc1, _uc2 = st.columns([3, 1])
+                with _uc1:
                     st.markdown(
                         f"**@{_u['username']}**"
-                        + (f"  \n<small>{_u['display_name']}</small>" if _u.get("display_name") else ""),
+                        + (f"  \n<small>{_u['display_name']}</small>"
+                           if _u.get("display_name") else ""),
                         unsafe_allow_html=True,
                     )
-                with _ucol2:
+                with _uc2:
                     if st.button("🗑️", key=f"x_del_user_{_u['username']}"):
                         xc.remove_user(_u["username"])
                         st.rerun()
@@ -6864,9 +6869,8 @@ def render_x_analysis_tab() -> None:
         # ── データ取得 ────────────────────────────────────────────────────────
         st.markdown("#### 📥 データ取得")
         _days = st.selectbox(
-            "集計期間", [7, 14, 30, 60, 90],
-            index=2, key="x_days_select",
-            format_func=lambda d: f"過去 {d} 日",
+            "集計期間", [7, 14, 30, 60, 90], index=2,
+            key="x_days_select", format_func=lambda d: f"過去 {d} 日",
         )
         _min_mentions = st.number_input(
             "最小メンション数", min_value=1, max_value=20, value=1, step=1,
@@ -6876,22 +6880,19 @@ def render_x_analysis_tab() -> None:
         if st.button(
             "🔄 投稿を取得", key="x_fetch_btn",
             use_container_width=True, type="primary",
-            disabled=(not _bearer or not _users),
+            disabled=(not _logged_in or not _users),
         ):
-            if not _bearer:
-                st.error("Bearer Token を設定してください")
-            else:
-                _prog = st.progress(0, text="取得中...")
-                with st.spinner("X API からデータを取得中..."):
-                    _results = xc.fetch_all_users(_bearer)
-                _prog.progress(100, text="完了！")
-
-                for _uname, _res in _results.items():
-                    if "error" in _res:
-                        st.error(f"@{_uname}: {_res['error']}")
-                    else:
-                        st.success(f"@{_uname}: +{_res['new_count']} 件")
-                st.rerun()
+            with st.spinner("投稿を取得中...（数十秒かかる場合があります）"):
+                try:
+                    _results = xc.fetch_all_users()
+                    for _uname, _res in _results.items():
+                        if "error" in _res:
+                            st.error(f"@{_uname}: {_res['error']}")
+                        else:
+                            st.success(f"@{_uname}: +{_res['new_count']} 件")
+                    st.rerun()
+                except Exception as _e:
+                    st.error(f"取得エラー: {_e}")
 
         st.divider()
 
@@ -6910,15 +6911,15 @@ def render_x_analysis_tab() -> None:
         # ── ノイズワード管理 ──────────────────────────────────────────────────
         with st.expander("🔇 ノイズワード管理", expanded=False):
             _nw_list = xc.get_noise_words()
-            _nw_add = st.text_input("追加するワード", key="x_nw_add")
-            _ncol1, _ncol2 = st.columns(2)
-            with _ncol1:
+            _nw_add  = st.text_input("追加するワード", key="x_nw_add")
+            _nc1, _nc2 = st.columns(2)
+            with _nc1:
                 if st.button("追加", key="x_nw_add_btn", use_container_width=True):
                     if _nw_add:
                         xc.add_noise_word(_nw_add)
                         st.rerun()
             _nw_sel = st.selectbox("削除するワード", [""] + _nw_list, key="x_nw_del_sel")
-            with _ncol2:
+            with _nc2:
                 if st.button("削除", key="x_nw_del_btn", use_container_width=True):
                     if _nw_sel:
                         xc.remove_noise_word(_nw_sel)
@@ -6937,8 +6938,8 @@ def render_x_analysis_tab() -> None:
         if not _summary:
             st.info(
                 "データがありません。\n\n"
-                "① 左パネルで追跡ユーザーを追加\n"
-                "② Bearer Token を設定\n"
+                "① 左パネルの「Xアカウント連携」でログイン\n"
+                "② 追跡ユーザーを追加\n"
                 "③「投稿を取得」ボタンを押す",
             )
             return

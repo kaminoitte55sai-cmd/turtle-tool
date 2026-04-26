@@ -18,6 +18,7 @@ master_save.pkl
 
 # X収集DB（ローカルのみ・Streamlit Cloud では再生成）
 x_tweets.db
+twscrape_accounts.db
 # memo_save.json と fundamental_list.csv は GitHub 永続化のため追跡対象
 
 # ログ・一時ファイル

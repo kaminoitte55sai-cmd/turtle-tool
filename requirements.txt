@@ -7,3 +7,5 @@ requests>=2.31.0
 certifi>=2024.0.0
 jpholiday>=0.1.8
 xlrd>=2.0.1
+twscrape>=0.17.0
+nest_asyncio>=1.6.0

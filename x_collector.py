@@ -2,27 +2,29 @@
 x_collector.py
 ==============
 X（旧Twitter）投稿収集・銘柄分析モジュール
+twscrape ベース（X公式APIキー不要・無料）
 
 DB設計
 ------
 x_users         : 追跡ユーザー
-x_tweets        : 収集済みツイート
-x_stock_mentions: 銘柄メンション（tweet × code）
-x_noise_words   : ノイズワード
-x_fetch_log     : 取得ログ
+x_tweets        : 収集済みツイート（tweet_id PRIMARY KEY で重複防止）
+x_stock_mentions: 銘柄メンション（tweet_id × stock_code UNIQUE）
+x_noise_words   : ノイズワード辞書
+x_fetch_log     : 取得履歴ログ
 """
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import sqlite3
 from typing import Optional
 
-import requests
-
 # ── パス ─────────────────────────────────────────────────────────────────────
-_DB_PATH = os.path.join(os.path.dirname(__file__), "x_tweets.db")
+_DIR          = os.path.dirname(__file__)
+_DB_PATH      = os.path.join(_DIR, "x_tweets.db")
+_TW_ACCT_DB   = os.path.join(_DIR, "twscrape_accounts.db")  # twscrape 内部用
 
 # ── デフォルトノイズワード ────────────────────────────────────────────────────
 _DEFAULT_NOISE_WORDS: list[str] = [
@@ -47,9 +49,7 @@ _BEARISH: list[str] = [
     "下方修正", "減配",
 ]
 
-# ── 定数 ──────────────────────────────────────────────────────────────────────
-_MIN_TEXT_LEN = 30          # フィルタ: 最小文字数
-_API_BASE     = "https://api.twitter.com/2"
+_MIN_TEXT_LEN = 30   # 短文フィルタ（文字数）
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -66,18 +66,16 @@ def init_db() -> None:
     """テーブル作成 & デフォルトデータ挿入"""
     with _db() as conn:
         conn.executescript("""
-        -- 追跡ユーザー
         CREATE TABLE IF NOT EXISTS x_users (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            username      TEXT    UNIQUE NOT NULL,   -- @なし
+            username      TEXT    UNIQUE NOT NULL,
             display_name  TEXT,
-            user_id       TEXT,                      -- X API の数値ID
-            last_tweet_id TEXT,                      -- 差分取得用
+            user_id       TEXT,
+            last_tweet_id TEXT,
             is_active     INTEGER DEFAULT 1,
             added_at      TEXT    DEFAULT (datetime('now'))
         );
 
-        -- ツイート本体
         CREATE TABLE IF NOT EXISTS x_tweets (
             tweet_id      TEXT PRIMARY KEY,
             username      TEXT NOT NULL,
@@ -92,7 +90,6 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_tw_user    ON x_tweets(username);
         CREATE INDEX IF NOT EXISTS idx_tw_created ON x_tweets(created_at);
 
-        -- 銘柄メンション（tweet × stock_code は UNIQUE）
         CREATE TABLE IF NOT EXISTS x_stock_mentions (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             tweet_id     TEXT NOT NULL,
@@ -105,13 +102,11 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_mn_code ON x_stock_mentions(stock_code);
         CREATE INDEX IF NOT EXISTS idx_mn_at   ON x_stock_mentions(mentioned_at);
 
-        -- ノイズワード
         CREATE TABLE IF NOT EXISTS x_noise_words (
             id   INTEGER PRIMARY KEY AUTOINCREMENT,
             word TEXT UNIQUE NOT NULL
         );
 
-        -- 取得ログ
         CREATE TABLE IF NOT EXISTS x_fetch_log (
             id         INTEGER PRIMARY KEY AUTOINCREMENT,
             username   TEXT NOT NULL,
@@ -120,7 +115,6 @@ def init_db() -> None:
             status     TEXT
         );
         """)
-        # デフォルトノイズワード
         for w in _DEFAULT_NOISE_WORDS:
             conn.execute(
                 "INSERT OR IGNORE INTO x_noise_words(word) VALUES(?)", (w,)
@@ -128,30 +122,91 @@ def init_db() -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ユーザー管理
+# twscrape ヘルパー（非同期→同期ラッパー）
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def add_user(username: str, bearer_token: str) -> dict:
-    """ユーザーを追跡リストに追加（API でユーザーID取得）"""
-    username = username.lstrip("@").strip()
-    headers  = {"Authorization": f"Bearer {bearer_token}"}
-    r = requests.get(
-        f"{_API_BASE}/users/by/username/{username}",
-        headers=headers,
-        params={"user.fields": "name"},
-        timeout=10,
+def _run(coro):
+    """asyncio コルーチンを同期的に実行するユーティリティ"""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # Jupyter / Streamlit の既存ループ内では nest_asyncio が必要
+            import nest_asyncio  # type: ignore
+            nest_asyncio.apply()
+            return loop.run_until_complete(coro)
+        return loop.run_until_complete(coro)
+    except RuntimeError:
+        return asyncio.run(coro)
+
+
+def _tw_api():
+    """twscrape API インスタンスを返す"""
+    from twscrape import API  # type: ignore
+    return API(_TW_ACCT_DB)
+
+
+# ── アカウントログイン ─────────────────────────────────────────────────────────
+
+async def _alogin(username: str, password: str, email: str) -> str:
+    """Xアカウントでログインしてセッションを保存する"""
+    from twscrape import API  # type: ignore
+    api = API(_TW_ACCT_DB)
+    await api.pool.add_account(
+        username=username,
+        password=password,
+        email=email,
+        email_password="",   # メール2FA を使っていない場合は空文字でOK
     )
-    if r.status_code == 404:
+    await api.pool.login_all()
+    # ログイン済みアカウントを確認
+    accounts = await api.pool.get_all()
+    logged = [a for a in accounts if a.active]
+    if not logged:
+        raise RuntimeError("ログインに失敗しました。ユーザー名・パスワード・メールを確認してください。")
+    return f"ログイン成功: @{logged[0].username}"
+
+
+def login_account(username: str, password: str, email: str) -> str:
+    return _run(_alogin(username, password, email))
+
+
+async def _aget_login_status() -> list[dict]:
+    from twscrape import API  # type: ignore
+    api = API(_TW_ACCT_DB)
+    accounts = await api.pool.get_all()
+    return [
+        {
+            "username": a.username,
+            "active":   a.active,
+            "last_used": str(a.lastUsed)[:19] if a.lastUsed else "—",
+        }
+        for a in accounts
+    ]
+
+
+def get_login_status() -> list[dict]:
+    return _run(_aget_login_status())
+
+
+def logout_account(username: str) -> None:
+    async def _do():
+        from twscrape import API  # type: ignore
+        api = API(_TW_ACCT_DB)
+        await api.pool.delete_accounts(username)
+    _run(_do())
+
+
+# ── ユーザー情報取得 ──────────────────────────────────────────────────────────
+
+async def _aadd_user(username: str) -> dict:
+    from twscrape import API  # type: ignore
+    api = API(_TW_ACCT_DB)
+    username = username.lstrip("@").strip()
+    user = await api.user_by_login(username)
+    if not user:
         raise ValueError(f"ユーザー @{username} が見つかりません")
-    if r.status_code == 401:
-        raise ValueError("Bearer Token が無効です")
-    if r.status_code != 200:
-        raise ValueError(f"API エラー {r.status_code}: {r.text[:200]}")
-
-    data         = r.json().get("data", {})
-    user_id      = data.get("id")
-    display_name = data.get("name", username)
-
+    display_name = user.displayname or username
+    user_id      = str(user.id)
     with _db() as conn:
         conn.execute("""
             INSERT INTO x_users(username, display_name, user_id, is_active)
@@ -161,8 +216,11 @@ def add_user(username: str, bearer_token: str) -> dict:
                 user_id      = excluded.user_id,
                 is_active    = 1
         """, (username, display_name, user_id))
-
     return {"username": username, "display_name": display_name, "user_id": user_id}
+
+
+def add_user(username: str) -> dict:
+    return _run(_aadd_user(username))
 
 
 def remove_user(username: str) -> None:
@@ -181,7 +239,7 @@ def get_users() -> list[dict]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# フィルタリング
+# フィルタリング & スコアリング
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _get_noise_words() -> list[str]:
@@ -196,188 +254,131 @@ def _is_noisy(text: str, noise_words: list[str]) -> bool:
 
 
 def _extract_stock_codes(text: str) -> list[str]:
-    """テキストから銘柄コードを抽出する
-
-    対応形式:
-      - 日本株 4桁数字   : 「7203」「9984」など
-      - US株 $ティッカー : 「$AAPL」「$NVDA」
-    """
+    """テキストから銘柄コードを抽出"""
     codes: set[str] = set()
-
-    # 日本株: 1000〜9999 の4桁数字（前後が数字でない）
+    # 日本株: 4桁数字（1000〜9999）
     for m in re.finditer(r'(?<!\d)(\d{4})(?!\d)', text):
         c = m.group(1)
         if 1000 <= int(c) <= 9999:
             codes.add(c)
-
     # US株: $TICKER（1〜5大文字）
     for m in re.finditer(r'\$([A-Z]{1,5})\b', text):
         codes.add(m.group(1))
-
     return list(codes)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# スコアリング
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def _calc_score(metrics: dict, text: str) -> float:
-    """ツイートのスコアを計算
-
-    基本スコア 1.0
-    + エンゲージメント加算（いいね / RT / リプライ）
-    + センチメント加算（強気・弱気ワード）
-    """
-    likes   = metrics.get("like_count",    0)
-    rts     = metrics.get("retweet_count", 0)
-    replies = metrics.get("reply_count",   0)
-
+def _calc_score(like: int, rt: int, reply: int, text: str) -> float:
     score  = 1.0
-    score += min(likes   / 10.0, 3.0) * 0.30   # いいねボーナス（最大+0.9）
-    score += min(rts     /  5.0, 3.0) * 0.50   # RTボーナス（最大+1.5）
-    score += min(replies /  5.0, 2.0) * 0.20   # リプライボーナス（最大+0.4）
-
+    score += min(like  / 10.0, 3.0) * 0.30
+    score += min(rt    /  5.0, 3.0) * 0.50
+    score += min(reply /  5.0, 2.0) * 0.20
     tl    = text.lower()
-    bull  = sum(1 for w in _BULLISH if w in tl)
-    bear  = sum(1 for w in _BEARISH if w in tl)
-    score += bull * 0.5
-    score -= bear * 0.3
-
+    score += sum(1 for w in _BULLISH if w in tl) * 0.5
+    score -= sum(1 for w in _BEARISH if w in tl) * 0.3
     return round(max(0.0, score), 2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 取得メイン
+# ツイート取得メイン
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _api_fetch_tweets(
-    user_id:      str,
-    bearer_token: str,
-    since_id:     Optional[str] = None,
-    max_results:  int = 100,
-) -> list[dict]:
-    """X API v2 でツイートを取得（リツイート・リプライ除外）"""
-    headers = {"Authorization": f"Bearer {bearer_token}"}
-    params: dict = {
-        "max_results":   min(max_results, 100),
-        "exclude":       "retweets,replies",
-        "tweet.fields":  "created_at,public_metrics,text",
-    }
-    if since_id:
-        params["since_id"] = since_id
+async def _afetch_user(user: dict, noise: list[str]) -> dict:
+    """1ユーザー分のツイートを差分取得してDBへ保存"""
+    from twscrape import API  # type: ignore
+    api       = API(_TW_ACCT_DB)
+    uname     = user["username"]
+    uid_str   = user.get("user_id")
+    since_id  = user.get("last_tweet_id")
+    new_count = 0
+    latest_id: Optional[str] = since_id
 
-    r = requests.get(
-        f"{_API_BASE}/users/{user_id}/tweets",
-        headers=headers,
-        params=params,
-        timeout=15,
-    )
-    if r.status_code == 429:
-        raise RuntimeError("APIレート制限に達しました。15分後に再試行してください。")
-    if r.status_code == 401:
-        raise RuntimeError("Bearer Token が無効です。設定を確認してください。")
-    if r.status_code != 200:
-        raise RuntimeError(f"API エラー {r.status_code}: {r.text[:300]}")
+    if not uid_str:
+        return {"error": "user_id 未取得。ユーザーを再追加してください。"}
 
-    return r.json().get("data") or []
+    uid = int(uid_str)
+    try:
+        async for tw in api.user_tweets(uid, limit=100):
+            tid = str(tw.id)
 
+            # 差分チェック（since_id より古いものはスキップ）
+            if since_id and tid <= since_id:
+                continue
 
-def fetch_all_users(bearer_token: str) -> dict[str, dict]:
-    """全アクティブユーザーのツイートを差分取得してDBへ保存
+            # リツイート除外（twscrape の user_tweets は exclude RT 対応済みだが念のため）
+            if tw.retweetedTweet is not None:
+                continue
 
-    Returns
-    -------
-    dict: {username: {"new_count": int} or {"error": str}}
-    """
-    init_db()
-    users   = get_users()
-    noise   = _get_noise_words()
-    results: dict[str, dict] = {}
+            text    = tw.rawContent or ""
+            created = tw.date.isoformat() if tw.date else ""
 
-    for user in users:
-        uname = user["username"]
-        uid   = user.get("user_id")
-        if not uid:
-            results[uname] = {"error": "user_id 未取得。ユーザーを再追加してください。"}
-            continue
-
-        try:
-            raw_tweets = _api_fetch_tweets(
-                uid, bearer_token, since_id=user.get("last_tweet_id")
-            )
-        except Exception as e:
-            results[uname] = {"error": str(e)}
-            with _db() as conn:
-                conn.execute(
-                    "INSERT INTO x_fetch_log(username, new_count, status) VALUES(?,0,?)",
-                    (uname, f"error: {e}"),
-                )
-            continue
-
-        new_count = 0
-        latest_id = user.get("last_tweet_id")
-
-        for tw in raw_tweets:
-            tweet_id = tw["id"]
-            text     = tw.get("text", "")
-            created  = tw.get("created_at", "")
-            metrics  = tw.get("public_metrics", {})
-
-            # ─ フィルタリング ─
+            # フィルタリング
             if len(text) < _MIN_TEXT_LEN:
                 continue
             if _is_noisy(text, noise):
                 continue
 
-            # ─ ツイート保存 ─
+            likes  = tw.likeCount    or 0
+            rts    = tw.retweetCount or 0
+            reps   = tw.replyCount   or 0
+            quotes = tw.quoteCount   or 0
+
             with _db() as conn:
                 cur = conn.execute("""
                     INSERT OR IGNORE INTO x_tweets(
                         tweet_id, username, text, created_at,
                         like_count, retweet_count, reply_count, quote_count
                     ) VALUES(?,?,?,?,?,?,?,?)
-                """, (
-                    tweet_id, uname, text, created,
-                    metrics.get("like_count",    0),
-                    metrics.get("retweet_count", 0),
-                    metrics.get("reply_count",   0),
-                    metrics.get("quote_count",   0),
-                ))
+                """, (tid, uname, text, created, likes, rts, reps, quotes))
                 if cur.rowcount > 0:
                     new_count += 1
 
-            # ─ 銘柄メンション & スコア ─
+            # 銘柄メンション & スコア
             codes = _extract_stock_codes(text)
-            score = _calc_score(metrics, text)
+            score = _calc_score(likes, rts, reps, text)
             for code in codes:
                 with _db() as conn:
                     conn.execute("""
                         INSERT OR IGNORE INTO x_stock_mentions(
                             tweet_id, stock_code, score, mentioned_at
                         ) VALUES(?,?,?,?)
-                    """, (tweet_id, code, score, created))
+                    """, (tid, code, score, created))
 
-            # 最新ツイートID を追跡
-            if latest_id is None or tweet_id > latest_id:
-                latest_id = tweet_id
+            if latest_id is None or tid > latest_id:
+                latest_id = tid
 
-        # last_tweet_id を更新（差分取得の起点）
-        if latest_id and latest_id != user.get("last_tweet_id"):
-            with _db() as conn:
-                conn.execute(
-                    "UPDATE x_users SET last_tweet_id=? WHERE username=?",
-                    (latest_id, uname),
-                )
+    except Exception as e:
+        return {"error": str(e)}
 
+    # last_tweet_id 更新
+    if latest_id and latest_id != since_id:
         with _db() as conn:
             conn.execute(
-                "INSERT INTO x_fetch_log(username, new_count, status) VALUES(?,?,'ok')",
-                (uname, new_count),
+                "UPDATE x_users SET last_tweet_id=? WHERE username=?",
+                (latest_id, uname),
             )
 
-        results[uname] = {"new_count": new_count}
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO x_fetch_log(username, new_count, status) VALUES(?,?,'ok')",
+            (uname, new_count),
+        )
 
+    return {"new_count": new_count}
+
+
+async def _afetch_all() -> dict[str, dict]:
+    init_db()
+    users = get_users()
+    noise = _get_noise_words()
+    results: dict[str, dict] = {}
+    for user in users:
+        results[user["username"]] = await _afetch_user(user, noise)
     return results
+
+
+def fetch_all_users() -> dict[str, dict]:
+    """全アクティブユーザーのツイートを差分取得（同期インターフェース）"""
+    return _run(_afetch_all())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -385,7 +386,6 @@ def fetch_all_users(bearer_token: str) -> dict[str, dict]:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def get_stock_summary(days: int = 30, min_mentions: int = 1) -> list[dict]:
-    """銘柄別サマリー（スコア降順）"""
     with _db() as conn:
         rows = conn.execute("""
             SELECT
@@ -405,12 +405,7 @@ def get_stock_summary(days: int = 30, min_mentions: int = 1) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_tweets_for_stock(
-    stock_code: str,
-    days:       int = 30,
-    limit:      int = 50,
-) -> list[dict]:
-    """指定銘柄に言及したツイート一覧（スコア降順）"""
+def get_tweets_for_stock(stock_code: str, days: int = 30, limit: int = 50) -> list[dict]:
     with _db() as conn:
         rows = conn.execute("""
             SELECT
@@ -435,24 +430,21 @@ def get_fetch_log(limit: int = 30) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_recent_tweets(days: int = 7, limit: int = 100) -> list[dict]:
+def get_db_stats() -> dict:
     with _db() as conn:
-        rows = conn.execute("""
-            SELECT * FROM x_tweets
-            WHERE created_at >= datetime('now', ? || ' days')
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (f"-{days}", limit)).fetchall()
-    return [dict(r) for r in rows]
+        tweets   = conn.execute("SELECT COUNT(*) FROM x_tweets").fetchone()[0]
+        users    = conn.execute("SELECT COUNT(*) FROM x_users WHERE is_active=1").fetchone()[0]
+        mentions = conn.execute("SELECT COUNT(*) FROM x_stock_mentions").fetchone()[0]
+        stocks   = conn.execute("SELECT COUNT(DISTINCT stock_code) FROM x_stock_mentions").fetchone()[0]
+    return {"tweets": tweets, "active_users": users,
+            "mentions": mentions, "unique_stocks": stocks}
 
 
 # ── ノイズワード管理 ──────────────────────────────────────────────────────────
 
 def add_noise_word(word: str) -> None:
     with _db() as conn:
-        conn.execute(
-            "INSERT OR IGNORE INTO x_noise_words(word) VALUES(?)", (word.strip(),)
-        )
+        conn.execute("INSERT OR IGNORE INTO x_noise_words(word) VALUES(?)", (word.strip(),))
 
 
 def remove_noise_word(word: str) -> None:
@@ -462,22 +454,5 @@ def remove_noise_word(word: str) -> None:
 
 def get_noise_words() -> list[str]:
     with _db() as conn:
-        rows = conn.execute(
-            "SELECT word FROM x_noise_words ORDER BY word"
-        ).fetchall()
+        rows = conn.execute("SELECT word FROM x_noise_words ORDER BY word").fetchall()
     return [r["word"] for r in rows]
-
-
-def get_db_stats() -> dict:
-    """DB統計情報"""
-    with _db() as conn:
-        tweets   = conn.execute("SELECT COUNT(*) FROM x_tweets").fetchone()[0]
-        users    = conn.execute("SELECT COUNT(*) FROM x_users WHERE is_active=1").fetchone()[0]
-        mentions = conn.execute("SELECT COUNT(*) FROM x_stock_mentions").fetchone()[0]
-        stocks   = conn.execute("SELECT COUNT(DISTINCT stock_code) FROM x_stock_mentions").fetchone()[0]
-    return {
-        "tweets":        tweets,
-        "active_users":  users,
-        "mentions":      mentions,
-        "unique_stocks": stocks,
-    }
