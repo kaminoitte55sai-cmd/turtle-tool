@@ -15,6 +15,9 @@ build/
 # ローカルデータファイル（個人データ・ポジション情報）
 turtle_save.json
 master_save.pkl
+
+# X収集DB（ローカルのみ・Streamlit Cloud では再生成）
+x_tweets.db
 # memo_save.json と fundamental_list.csv は GitHub 永続化のため追跡対象
 
 # ログ・一時ファイル

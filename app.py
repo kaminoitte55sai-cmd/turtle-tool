@@ -6749,12 +6749,13 @@ def main() -> None:
     </style>
     """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "🔍 スクリーニング",
         "👀 監視銘柄",
         "💼 ポジション管理",
         "📈 バックテスト",
         "📰 決算レポート",
+        "🐦 Xユーザー 銘柄分析",
     ])
 
     with tab1:
@@ -6771,6 +6772,271 @@ def main() -> None:
 
     with tab5:
         render_earnings_report_tab()
+
+    with tab6:
+        render_x_analysis_tab()
+
+
+def render_x_analysis_tab() -> None:
+    """Xユーザー 銘柄分析タブ"""
+    import x_collector as xc
+
+    st.title("🐦 Xユーザー 銘柄分析")
+    xc.init_db()
+
+    # ── Bearer Token ──────────────────────────────────────────────────────────
+    _bearer_secret = st.secrets.get("X_BEARER_TOKEN", "")
+    if _bearer_secret:
+        _bearer = _bearer_secret
+    else:
+        _bearer = st.session_state.get("x_bearer_token", "")
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # レイアウト: 左サイドバー（設定） | 右メイン（分析）
+    # ═══════════════════════════════════════════════════════════════════════════
+    col_cfg, col_main = st.columns([1, 3], gap="large")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 左列: 設定パネル
+    # ──────────────────────────────────────────────────────────────────────────
+    with col_cfg:
+        st.markdown("### ⚙️ 設定")
+
+        # Bearer Token 入力（secrets未設定の場合）
+        if not _bearer_secret:
+            _input_token = st.text_input(
+                "X Bearer Token",
+                value=_bearer,
+                type="password",
+                placeholder="AAA...XXX",
+                help="X Developer Portal で取得した Bearer Token",
+                key="x_bearer_input",
+            )
+            if _input_token != _bearer:
+                st.session_state["x_bearer_token"] = _input_token
+                _bearer = _input_token
+        else:
+            st.success("Bearer Token: secrets から読み込み済み ✅")
+
+        st.divider()
+
+        # ── ユーザー追加 ──────────────────────────────────────────────────────
+        st.markdown("#### 👤 追跡ユーザー")
+
+        _new_user = st.text_input(
+            "Xユーザー名を追加", placeholder="@username",
+            key="x_new_user_input",
+        )
+        if st.button("➕ 追加", key="x_add_user_btn", use_container_width=True):
+            if not _bearer:
+                st.error("Bearer Token を入力してください")
+            elif not _new_user:
+                st.error("ユーザー名を入力してください")
+            else:
+                with st.spinner("ユーザー情報を取得中..."):
+                    try:
+                        info = xc.add_user(_new_user, _bearer)
+                        st.success(f"追加: @{info['username']} ({info['display_name']})")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+        # ユーザー一覧
+        _users = xc.get_users()
+        if _users:
+            for _u in _users:
+                _ucol1, _ucol2 = st.columns([3, 1])
+                with _ucol1:
+                    st.markdown(
+                        f"**@{_u['username']}**"
+                        + (f"  \n<small>{_u['display_name']}</small>" if _u.get("display_name") else ""),
+                        unsafe_allow_html=True,
+                    )
+                with _ucol2:
+                    if st.button("🗑️", key=f"x_del_user_{_u['username']}"):
+                        xc.remove_user(_u["username"])
+                        st.rerun()
+        else:
+            st.info("追跡ユーザーがいません")
+
+        st.divider()
+
+        # ── データ取得 ────────────────────────────────────────────────────────
+        st.markdown("#### 📥 データ取得")
+        _days = st.selectbox(
+            "集計期間", [7, 14, 30, 60, 90],
+            index=2, key="x_days_select",
+            format_func=lambda d: f"過去 {d} 日",
+        )
+        _min_mentions = st.number_input(
+            "最小メンション数", min_value=1, max_value=20, value=1, step=1,
+            key="x_min_mentions",
+        )
+
+        if st.button(
+            "🔄 投稿を取得", key="x_fetch_btn",
+            use_container_width=True, type="primary",
+            disabled=(not _bearer or not _users),
+        ):
+            if not _bearer:
+                st.error("Bearer Token を設定してください")
+            else:
+                _prog = st.progress(0, text="取得中...")
+                with st.spinner("X API からデータを取得中..."):
+                    _results = xc.fetch_all_users(_bearer)
+                _prog.progress(100, text="完了！")
+
+                for _uname, _res in _results.items():
+                    if "error" in _res:
+                        st.error(f"@{_uname}: {_res['error']}")
+                    else:
+                        st.success(f"@{_uname}: +{_res['new_count']} 件")
+                st.rerun()
+
+        st.divider()
+
+        # ── DB 統計 ───────────────────────────────────────────────────────────
+        _stats = xc.get_db_stats()
+        st.markdown("#### 📊 DB統計")
+        st.markdown(f"""
+| 項目 | 件数 |
+|------|------|
+| ツイート | {_stats['tweets']:,} |
+| メンション | {_stats['mentions']:,} |
+| ユニーク銘柄 | {_stats['unique_stocks']:,} |
+| 追跡ユーザー | {_stats['active_users']} |
+""")
+
+        # ── ノイズワード管理 ──────────────────────────────────────────────────
+        with st.expander("🔇 ノイズワード管理", expanded=False):
+            _nw_list = xc.get_noise_words()
+            _nw_add = st.text_input("追加するワード", key="x_nw_add")
+            _ncol1, _ncol2 = st.columns(2)
+            with _ncol1:
+                if st.button("追加", key="x_nw_add_btn", use_container_width=True):
+                    if _nw_add:
+                        xc.add_noise_word(_nw_add)
+                        st.rerun()
+            _nw_sel = st.selectbox("削除するワード", [""] + _nw_list, key="x_nw_del_sel")
+            with _ncol2:
+                if st.button("削除", key="x_nw_del_btn", use_container_width=True):
+                    if _nw_sel:
+                        xc.remove_noise_word(_nw_sel)
+                        st.rerun()
+            if _nw_list:
+                st.markdown("**登録済み**: " + " / ".join(f"`{w}`" for w in _nw_list[:20]))
+                if len(_nw_list) > 20:
+                    st.caption(f"他 {len(_nw_list) - 20} 件")
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 右列: 分析メイン
+    # ──────────────────────────────────────────────────────────────────────────
+    with col_main:
+        _summary = xc.get_stock_summary(days=_days, min_mentions=_min_mentions)
+
+        if not _summary:
+            st.info(
+                "データがありません。\n\n"
+                "① 左パネルで追跡ユーザーを追加\n"
+                "② Bearer Token を設定\n"
+                "③「投稿を取得」ボタンを押す",
+            )
+            return
+
+        # ── 銘柄サマリーテーブル ──────────────────────────────────────────────
+        st.markdown(f"### 📋 銘柄別サマリー（過去 {_days} 日）")
+
+        import altair as alt
+        _df = pd.DataFrame(_summary)
+        _df.columns = ["銘柄コード", "メンション数", "合計スコア", "平均スコア", "最終言及", "言及ユーザー数"]
+        _df["最終言及"] = pd.to_datetime(_df["最終言及"]).dt.strftime("%m/%d %H:%M")
+
+        # スコアに応じた行色（Styler）
+        def _score_color(val):
+            if isinstance(val, float):
+                if val >= 5.0:
+                    return "color: #dc2626; font-weight:600"
+                if val >= 3.0:
+                    return "color: #d97706; font-weight:600"
+            return ""
+
+        _styled = (
+            _df.style
+            .applymap(_score_color, subset=["合計スコア", "平均スコア"])
+            .format({"合計スコア": "{:.1f}", "平均スコア": "{:.2f}"})
+        )
+        st.dataframe(_styled, use_container_width=True, hide_index=True, height=280)
+
+        # ── スコアTop10 横棒グラフ ────────────────────────────────────────────
+        _chart_df = _df.head(10).copy()
+        _bar = alt.Chart(_chart_df).mark_bar(color="#2563eb").encode(
+            x=alt.X("合計スコア:Q", title="合計スコア"),
+            y=alt.Y("銘柄コード:N", sort="-x", title=None),
+            tooltip=["銘柄コード:N", "合計スコア:Q", "メンション数:Q", "言及ユーザー数:Q"],
+        ).properties(title="Top 10 銘柄スコア", height=min(320, len(_chart_df) * 38 + 40))
+        st.altair_chart(_bar, use_container_width=True)
+
+        st.divider()
+
+        # ── 銘柄別ツイート詳細 ───────────────────────────────────────────────
+        st.markdown("### 🔍 銘柄別ツイート")
+
+        _code_options = _df["銘柄コード"].tolist()
+        _sel_code = st.selectbox(
+            "銘柄コードを選択", _code_options, key="x_sel_stock"
+        )
+
+        if _sel_code:
+            _tweets = xc.get_tweets_for_stock(_sel_code, days=_days)
+            st.markdown(f"**@{_sel_code}** に言及したツイート: {len(_tweets)} 件")
+
+            for _tw in _tweets:
+                _score = _tw.get("score", 0)
+                _badge_color = (
+                    "#dc2626" if _score >= 5 else
+                    "#d97706" if _score >= 3 else
+                    "#6b7280"
+                )
+                _dt = _tw.get("created_at", "")[:16].replace("T", " ")
+                _likes = _tw.get("like_count", 0)
+                _rts   = _tw.get("retweet_count", 0)
+
+                st.markdown(
+                    f"""<div style="
+                        border:1px solid #e5e7eb;
+                        border-left:4px solid {_badge_color};
+                        border-radius:6px;
+                        padding:10px 14px;
+                        margin-bottom:8px;
+                        background:#fafafa;
+                    ">
+                    <div style="font-size:12px;color:#6b7280;margin-bottom:4px;">
+                        <b>@{_tw['username']}</b> &nbsp;·&nbsp; {_dt}
+                        &nbsp;·&nbsp; ❤️ {_likes} &nbsp; 🔁 {_rts}
+                        &nbsp;·&nbsp; <span style="
+                            background:{_badge_color};
+                            color:#fff;
+                            padding:1px 6px;
+                            border-radius:10px;
+                            font-size:11px;
+                        ">Score {_score:.1f}</span>
+                    </div>
+                    <div style="font-size:14px;line-height:1.6;white-space:pre-wrap;">{_tw['text']}</div>
+                    </div>""",
+                    unsafe_allow_html=True,
+                )
+
+        st.divider()
+
+        # ── 取得ログ ──────────────────────────────────────────────────────────
+        with st.expander("📜 取得ログ", expanded=False):
+            _logs = xc.get_fetch_log(20)
+            if _logs:
+                _log_df = pd.DataFrame(_logs)[["fetched_at", "username", "new_count", "status"]]
+                _log_df.columns = ["取得日時", "ユーザー", "新規件数", "ステータス"]
+                st.dataframe(_log_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("ログなし")
 
 
 if __name__ == "__main__":
