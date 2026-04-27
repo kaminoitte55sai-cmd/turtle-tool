@@ -2303,9 +2303,9 @@ def render_screener_tab() -> None:
         st.markdown("### ⚙️ MACDパラメータ")
         _m1, _m2 = st.columns(2)
         with _m1:
-            _macd_sel_520  = st.checkbox("MACD(5, 20)",  value=True,  key="macd_sel_520")
-            _macd_sel_2040 = st.checkbox("MACD(20, 40)", value=True,  key="macd_sel_2040")
-            _macd_sel_540  = st.checkbox("MACD(5, 40)",  value=False, key="macd_sel_540")
+            _macd_sel_520  = st.checkbox("MACD(5, 20)　状態6",  value=True,  key="macd_sel_520")
+            _macd_sel_2040 = st.checkbox("MACD(20, 40)　状態1", value=True,  key="macd_sel_2040")
+            _macd_sel_540  = st.checkbox("MACD(5, 40)　状態5",  value=False, key="macd_sel_540")
         with _m2:
             _macd_within = st.number_input(
                 "📅 上抜けから何日以内",
