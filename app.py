@@ -2407,24 +2407,61 @@ def render_screener_tab() -> None:
                         _hit     = False
                         _any_ok  = False
 
+                        # ── 3種のMACDを全て事前計算（順序条件チェックに必要）──────────
+                        _ALL_PARAMS   = [(5, 20), (20, 40), (5, 40)]
+                        _macd_vals:   dict = {}   # (short,long) -> float (最新値)
+                        _macd_series: dict = {}   # (short,long) -> pd.Series
+
+                        for _sp, _lp in _ALL_PARAMS:
+                            if len(_close) >= _lp + 5:
+                                _s = calc_macd(_close, _sp, _lp)
+                                _macd_vals[(_sp, _lp)]   = float(_s.iloc[-1])
+                                _macd_series[(_sp, _lp)] = _s
+
+                        # ── 順序条件チェック関数 ──────────────────────────────────────
+                        # MACD(5,20)  選択時: MACD(5,20) > MACD(5,40) > MACD(20,40)
+                        # MACD(20,40) 選択時: MACD(5,40) > MACD(5,20) > MACD(20,40)
+                        # MACD(5,40)  選択時: MACD(5,20) > MACD(5,40) > MACD(20,40)
+                        def _order_ok(sp: int, lp: int) -> bool:
+                            v520  = _macd_vals.get((5,  20))
+                            v2040 = _macd_vals.get((20, 40))
+                            v540  = _macd_vals.get((5,  40))
+                            if None in (v520, v2040, v540):
+                                return False  # 3種すべて計算できなければ不通過
+                            if (sp, lp) == (20, 40):
+                                # MACD(20,40) 選択: MACD(5,40) > MACD(5,20) > MACD(20,40)
+                                return v540 > v520 > v2040
+                            else:
+                                # MACD(5,20) / MACD(5,40) 選択: MACD(5,20) > MACD(5,40) > MACD(20,40)
+                                return v520 > v540 > v2040
+
+                        # ── 選択された各MACDについてクロス＋順序条件を判定 ────────────
                         for _short, _long in _selected_macd_params:
                             _col  = f"MACD({_short},{_long})"
                             _ccol = f"上抜け日({_short},{_long})"
 
-                            if len(_close) < _long + 5:
+                            if (_short, _long) not in _macd_series:
                                 _row[_col]  = None
                                 _row[_ccol] = None
                                 continue
 
-                            _macd_s   = calc_macd(_close, _short, _long)
-                            _macd_val = round(float(_macd_s.iloc[-1]), 4)
+                            _macd_s   = _macd_series[(_short, _long)]
+                            _macd_val = round(_macd_vals[(_short, _long)], 4)
                             _row[_col] = _macd_val
-                            _any_ok = True
+                            _any_ok   = True
 
                             _crossed, _cdate = detect_cross(_macd_s, int(_macd_within))
                             _row[_ccol] = _cdate if _crossed else None
-                            if _crossed:
+
+                            # クロス条件 AND 順序条件 を両方満たすときのみ通過
+                            if _crossed and _order_ok(_short, _long):
                                 _hit = True
+
+                        # 選択外のMACDの値も参照列として出力に追加
+                        for _sp, _lp in _ALL_PARAMS:
+                            _ck = f"MACD({_sp},{_lp})"
+                            if _ck not in _row and (_sp, _lp) in _macd_vals:
+                                _row[_ck] = round(_macd_vals[(_sp, _lp)], 4)
 
                         if not _any_ok:
                             _macd_errors.append(f"{_mt}: MACD 計算不可")
