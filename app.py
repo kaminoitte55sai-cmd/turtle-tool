@@ -959,41 +959,55 @@ def calc_macd(close: pd.Series, short: int, long_: int) -> pd.Series:
 
 def detect_cross(macd: pd.Series, within_days: int) -> "tuple[bool, str | None]":
     """
-    MACD がゼロラインを下から上にクロスしたかどうかを判定。
+    MACD がゼロラインを下から上にクロスし、かつクロス後も現在までMACD>0を
+    維持しているかどうかを判定。
+
+    条件:
+      1. 直近 within_days 営業日以内にゼロライン上抜けが発生
+         (前日 < 0 かつ 当日 > 0)
+      2. クロス発生日から最新日まで MACD が一度もゼロ以下にならない
+
     - shift(1) で前日値を参照（未来データを使わない）
     - rolling(within_days).max() で「n日以内にクロスが発生したか」を判定
 
     Returns:
-        (True, cross_date_str) : within_days 以内にクロスあり
-        (False, None)          : クロスなし
+        (True, cross_date_str) : 条件をすべて満たす
+        (False, None)          : 条件不成立
     """
     if len(macd) < 2:
         return False, None
 
-    # クロス発生フラグ: 前日 < 0 かつ 当日 > 0
+    # ① クロス発生フラグ: 前日 < 0 かつ 当日 > 0
     prev  = macd.shift(1)
     cross = (prev < 0) & (macd > 0)
 
-    # 直近 within_days 日以内にクロスがあるか（rolling max で判定）
+    # ② 直近 within_days 日以内にクロスがあるか（rolling max で判定）
     recent = cross.rolling(window=within_days, min_periods=1).max()
-
     if recent.iloc[-1] != 1:
         return False, None
 
-    # クロスが発生した最後の日付を取得
+    # ③ 有効なクロス日を特定
     cross_dates = macd.index[cross]
     if len(cross_dates) == 0:
         return False, None
 
-    # within_days 以内の最新クロス日
-    last_date  = macd.index[-1]
-    cutoff     = last_date - pd.Timedelta(days=within_days * 2)  # 余裕を持たせる
-    valid      = cross_dates[cross_dates >= cutoff]
+    last_date = macd.index[-1]
+    cutoff    = last_date - pd.Timedelta(days=within_days * 2)  # 余裕を持たせる
+    valid     = cross_dates[cross_dates >= cutoff]
     if len(valid) == 0:
         return False, None
 
-    cross_date = valid[-1].strftime("%Y-%m-%d")
-    return True, cross_date
+    # ④ 有効クロスのうち最も古いものを採用し、そこから現在まで MACD > 0 を維持しているか確認
+    #    「最新クロス」を使うと途中でマイナス→再クロスした場合に抜け穴になるため
+    #    「有効期間内の最初のクロス」から連続維持を検証する
+    cross_date = valid[0]  # 有効期間内の最初のクロス日（Timestamp）
+
+    macd_since_cross = macd.loc[cross_date:]
+    if (macd_since_cross <= 0).any():
+        # クロス後に一度でも MACD ≤ 0 になった場合は不合格
+        return False, None
+
+    return True, cross_date.strftime("%Y-%m-%d")
 
 
 def screen_stocks_macd(
