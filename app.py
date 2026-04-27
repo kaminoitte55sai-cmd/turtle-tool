@@ -394,6 +394,8 @@ def init_state() -> None:
         st.session_state.screener_results     = None
     if "screener_input"       not in st.session_state:
         st.session_state.screener_input       = "7203, 9984, 6758, 8306, 9433, 6367, 8035, 4063, 6501, 6857"
+    if "macd_results"       not in st.session_state: st.session_state.macd_results = None
+    if "macd_ticker_input"  not in st.session_state: st.session_state.macd_ticker_input = ""
     if "screener_prev_preset" not in st.session_state:
         st.session_state.screener_prev_preset = PRESET_OPTIONS[0]
 
@@ -922,6 +924,156 @@ def screen_ticker(
     except Exception as e:
         return None, str(e)
 
+
+
+
+# ===========================================================================
+# MACDゼロライン上抜けスクリーナー
+# ===========================================================================
+
+def fetch_data_for_macd(ticker: str, period: str = "6mo") -> "pd.DataFrame | None":
+    """
+    yfinance から OHLCV データを取得して返す。
+    エラー時は None を返す。
+    """
+    try:
+        df = yf.download(ticker, period=period, progress=False, auto_adjust=True)
+        if df.empty:
+            return None
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return df
+    except Exception:
+        return None
+
+
+def calc_macd(close: pd.Series, short: int, long_: int) -> pd.Series:
+    """
+    MACD = EMA(short) - EMA(long) を計算して返す。
+    adjust=False で指数加重移動平均を計算（未来データ使用なし）。
+    """
+    ema_short = close.ewm(span=short, adjust=False).mean()
+    ema_long  = close.ewm(span=long_,  adjust=False).mean()
+    return ema_short - ema_long
+
+
+def detect_cross(macd: pd.Series, within_days: int) -> "tuple[bool, str | None]":
+    """
+    MACD がゼロラインを下から上にクロスしたかどうかを判定。
+    - shift(1) で前日値を参照（未来データを使わない）
+    - rolling(within_days).max() で「n日以内にクロスが発生したか」を判定
+
+    Returns:
+        (True, cross_date_str) : within_days 以内にクロスあり
+        (False, None)          : クロスなし
+    """
+    if len(macd) < 2:
+        return False, None
+
+    # クロス発生フラグ: 前日 < 0 かつ 当日 > 0
+    prev  = macd.shift(1)
+    cross = (prev < 0) & (macd > 0)
+
+    # 直近 within_days 日以内にクロスがあるか（rolling max で判定）
+    recent = cross.rolling(window=within_days, min_periods=1).max()
+
+    if recent.iloc[-1] != 1:
+        return False, None
+
+    # クロスが発生した最後の日付を取得
+    cross_dates = macd.index[cross]
+    if len(cross_dates) == 0:
+        return False, None
+
+    # within_days 以内の最新クロス日
+    last_date  = macd.index[-1]
+    cutoff     = last_date - pd.Timedelta(days=within_days * 2)  # 余裕を持たせる
+    valid      = cross_dates[cross_dates >= cutoff]
+    if len(valid) == 0:
+        return False, None
+
+    cross_date = valid[-1].strftime("%Y-%m-%d")
+    return True, cross_date
+
+
+def screen_stocks_macd(
+    tickers:     "list[str]",
+    macd_params: "list[tuple[int, int]]",
+    within_days: int,
+) -> "tuple[list[dict], list[str]]":
+    """
+    複数銘柄に対して MACD ゼロライン上抜けスクリーニングを実行する。
+
+    Args:
+        tickers     : 銘柄コードリスト（例: ["7203.T", "9984.T"]）
+        macd_params : MACD パラメータリスト（例: [(5,20), (20,40), (5,40)]）
+        within_days : ゼロライン上抜けから何日以内か
+
+    Returns:
+        (passed_list, error_list)
+        passed_list: 条件を満たした銘柄の情報辞書リスト
+        error_list : エラーが発生した銘柄のメッセージリスト
+    """
+    passed: list[dict] = []
+    errors: list[str]  = []
+
+    # MACD 計算に必要な最低データ数（最長期間の3倍を目安）
+    max_long = max(lg for _, lg in macd_params) if macd_params else 40
+    min_rows = max_long * 3
+
+    for ticker in tickers:
+        try:
+            df = fetch_data_for_macd(ticker, period="1y")
+            if df is None or df.empty:
+                errors.append(f"{ticker}: データなし")
+                continue
+
+            if len(df) < min_rows:
+                errors.append(f"{ticker}: データ不足（{len(df)}日）")
+                continue
+
+            close = df["Close"].squeeze()  # Series に変換
+
+            last_price = float(close.iloc[-1])
+            row: dict  = {
+                "ティッカー": ticker,
+                "最終価格":   round(last_price, 2),
+            }
+
+            hit      = False   # OR 条件: 1つでも条件を満たせば通過
+            any_macd = False   # いずれかの MACD が計算できたか
+
+            for short, long_ in macd_params:
+                col_name   = f"MACD({short},{long_})"
+                cross_col  = f"上抜け日({short},{long_})"
+
+                if len(close) < long_ + 5:
+                    row[col_name]  = None
+                    row[cross_col] = None
+                    continue
+
+                macd_series = calc_macd(close, short, long_)
+                macd_val    = round(float(macd_series.iloc[-1]), 4)
+                row[col_name] = macd_val
+                any_macd = True
+
+                crossed, cross_date = detect_cross(macd_series, within_days)
+                row[cross_col] = cross_date if crossed else None
+
+                if crossed:
+                    hit = True
+
+            if not any_macd:
+                errors.append(f"{ticker}: MACD 計算不可（データ不足）")
+                continue
+
+            if hit:
+                passed.append(row)
+
+        except Exception as e:
+            errors.append(f"{ticker}: {e}")
+
+    return passed, errors
 
 # ===========================================================================
 # スクリーナー: CSV 銘柄コード解析
@@ -1630,497 +1782,742 @@ def render_screener_tab() -> None:
     st.divider()
 
     # ════════════════════════════════════════════════════════════════════════
-    # ③ スクリーニング実行
+    # ③ スクリーニング手法を選択（タブ）
     # ════════════════════════════════════════════════════════════════════════
-    st.markdown("### 🔍 ブレイクアウトスクリーニング")
-    st.markdown("""
-    ドンチャンブレイクアウトを検知し、**時間フィルター**と**待機DDフィルター**で
-    ダマシを除外した高精度スクリーニングを実行します。
-    - ⏱️ **時間フィルター**: ブレイク後N日待機し、価格がまだブレイク水準以上なら採用
-    - 🛡️ **待機DDフィルター**: 待機期間中の最大下落が許容範囲内の銘柄のみ採用
-    - 🔥 **出来高条件**: ブレイク日の出来高がN日平均の指定倍率以上
-    """)
-    st.divider()
+    _sc_tab_dc, _sc_tab_macd = st.tabs(["📈 ドンチャンブレイクアウト", "📉 MACDゼロライン上抜け"])
 
-    # ────────────────────────────────────────────────────────────────────────
-    # スクリーニングパラメータ設定
-    # ────────────────────────────────────────────────────────────────────────
-    st.markdown("### ⚙️ スクリーニングパラメータ")
-    p1, p2, p3, p4 = st.columns(4)
+    with _sc_tab_dc:
+        st.markdown("### 🔍 ブレイクアウトスクリーニング")
+        st.markdown("""
+        ドンチャンブレイクアウトを検知し、**時間フィルター**と**待機DDフィルター**で
+        ダマシを除外した高精度スクリーニングを実行します。
+        - ⏱️ **時間フィルター**: ブレイク後N日待機し、価格がまだブレイク水準以上なら採用
+        - 🛡️ **待機DDフィルター**: 待機期間中の最大下落が許容範囲内の銘柄のみ採用
+        - 🔥 **出来高条件**: ブレイク日の出来高がN日平均の指定倍率以上
+        """)
+        st.divider()
 
-    with p1:
-        sc_donchian = st.number_input(
-            "📅 ドンチャン期間（日）",
-            min_value=5, max_value=60, value=20, step=1,
-            help="N日高値上抜けを判定する期間",
-            key="sc_donchian",
+        # ────────────────────────────────────────────────────────────────────────
+        # スクリーニングパラメータ設定
+        # ────────────────────────────────────────────────────────────────────────
+        st.markdown("### ⚙️ スクリーニングパラメータ")
+        p1, p2, p3, p4 = st.columns(4)
+
+        with p1:
+            sc_donchian = st.number_input(
+                "📅 ドンチャン期間（日）",
+                min_value=5, max_value=60, value=20, step=1,
+                help="N日高値上抜けを判定する期間",
+                key="sc_donchian",
+            )
+
+        with p2:
+            sc_delay = st.selectbox(
+                "⏱️ 遅延日数（delay_days）",
+                options=[0, 3, 5, 10, 20],
+                index=2,
+                format_func=lambda x: f"{x}日" if x > 0 else "即時（0日）",
+                key="sc_delay",
+                help="ブレイク後この日数が経過してから条件チェック",
+            )
+
+        with p3:
+            sc_dd = st.selectbox(
+                "🛡️ 待機DD閾値（%）",
+                options=[-1.5, -2.0, -2.5, -3.0],
+                index=3,
+                format_func=lambda x: f"{x:.1f}%",
+                key="sc_dd",
+                help="待機期間中の最大下落率の下限（例: -3.0% → 3%超の下落はNG）",
+            )
+
+        with p4:
+            sc_vol = st.slider(
+                "🔥 出来高倍率 閾値",
+                min_value=1.0, max_value=5.0, value=1.0, step=0.1,
+                format="%.1f×",
+                key="sc_vol",
+                help="ブレイク日出来高 ÷ N日平均出来高 がこの値以上の銘柄のみ通過",
+            )
+
+        st.caption(
+            f"📌 判定条件: ドンチャン{sc_donchian}日 ｜ "
+            f"遅延{sc_delay}日後に価格確認 ｜ "
+            f"待機DD > {sc_dd:.1f}% ｜ "
+            f"出来高 ≥ {sc_vol:.1f}×"
         )
 
-    with p2:
-        sc_delay = st.selectbox(
-            "⏱️ 遅延日数（delay_days）",
-            options=[0, 3, 5, 10, 20],
-            index=2,
-            format_func=lambda x: f"{x}日" if x > 0 else "即時（0日）",
-            key="sc_delay",
-            help="ブレイク後この日数が経過してから条件チェック",
+        # ────────────────────────────────────────────────────────────────────────
+        # 銘柄リスト（マスタフィルター結果 / プリセット / CSV / 手動入力）
+        # ────────────────────────────────────────────────────────────────────────
+        st.markdown("### 📋 銘柄リスト")
+
+        # 銘柄マスタのフィルター結果を反映ボタン
+        if _filtered_count > 0:
+            if st.button(
+                f"📥 フィルター結果を反映（{_filtered_count:,} 銘柄）",
+                key="sc_import_master",
+                help="上記フィルター後の銘柄をテキストエリアに一括反映します",
+            ):
+                _codes = ", ".join(_filtered_tickers)
+                st.session_state.sc_ticker_input = _codes
+                st.session_state.sc_ticker_area  = _codes
+                st.success(f"✅ {_filtered_count:,} 銘柄を反映しました")
+
+        sc_preset_col, sc_csv_col = st.columns([0.45, 0.55])
+
+        with sc_preset_col:
+            sc_preset = st.selectbox(
+                "入力方法 / プリセット",
+                options=PRESET_OPTIONS,
+                key="sc_preset_select",
+            )
+
+        if sc_preset != st.session_state.sc_prev_preset:
+            if sc_preset == PRESET_OPTIONS[1]:
+                _ps = ", ".join(TOPIX100_TICKERS)
+                st.session_state.sc_ticker_input = _ps
+                st.session_state.sc_ticker_area  = _ps
+            elif sc_preset == PRESET_OPTIONS[2]:
+                _ps = ", ".join(NIKKEI225_TICKERS)
+                st.session_state.sc_ticker_input = _ps
+                st.session_state.sc_ticker_area  = _ps
+            st.session_state.sc_prev_preset = sc_preset
+
+        with sc_csv_col:
+            sc_uploaded = st.file_uploader(
+                "📂 銘柄CSVをアップロード",
+                type=["csv"],
+                key="sc_csv_uploader",
+                help=(
+                    "ticker 列（例: 7203.T）または code 列（例: 7203）を含む CSV。\n"
+                    "アップロードするとテキストエリアの内容を自動置換します。"
+                ),
+            )
+
+        if sc_uploaded is not None:
+            sc_file_id = getattr(sc_uploaded, "file_id", sc_uploaded.name)
+            if st.session_state.sc_csv_file_id != sc_file_id:
+                st.session_state.sc_csv_file_id = sc_file_id
+                csv_tickers, csv_err = _parse_screener_csv(sc_uploaded)
+                if csv_err:
+                    st.error(f"❌ {csv_err}")
+                else:
+                    ticker_str = ", ".join(csv_tickers)
+                    st.session_state.sc_ticker_input = ticker_str
+                    st.session_state.sc_ticker_area  = ticker_str
+                    st.success(
+                        f"✅ CSV 読み込み成功 — **{len(csv_tickers)} 銘柄**をテキストエリアに反映しました。"
+                    )
+
+        sc_ticker_input = st.text_area(
+            "銘柄コード（カンマ区切り）",
+            height=80,
+            key="sc_ticker_area",
+            label_visibility="collapsed",
+            help="4桁数字も可（7203 → 7203.T に自動変換）。マスタ反映後は手動編集も可能。",
         )
+        if sc_preset == PRESET_OPTIONS[0] and sc_uploaded is None:
+            st.session_state.sc_ticker_input = sc_ticker_input
 
-    with p3:
-        sc_dd = st.selectbox(
-            "🛡️ 待機DD閾値（%）",
-            options=[-1.5, -2.0, -2.5, -3.0],
-            index=3,
-            format_func=lambda x: f"{x:.1f}%",
-            key="sc_dd",
-            help="待機期間中の最大下落率の下限（例: -3.0% → 3%超の下落はNG）",
-        )
+        raw_list = [t.strip() for t in sc_ticker_input.split(",") if t.strip()]
+        st.caption(f"銘柄数: **{len(raw_list)}** 件")
 
-    with p4:
-        sc_vol = st.slider(
-            "🔥 出来高倍率 閾値",
-            min_value=1.0, max_value=5.0, value=1.0, step=0.1,
-            format="%.1f×",
-            key="sc_vol",
-            help="ブレイク日出来高 ÷ N日平均出来高 がこの値以上の銘柄のみ通過",
-        )
+        # ────────────────────────────────────────────────────────────────────────
+        # ③ 実行 / クリア ボタン
+        # ────────────────────────────────────────────────────────────────────────
+        run_col, clr_col, _ = st.columns([0.22, 0.10, 0.68])
+        with run_col:
+            run_btn = st.button(
+                "🚀 スクリーニング実行", use_container_width=True,
+                type="primary", key="sc_run_btn",
+            )
+        with clr_col:
+            if st.button("クリア", use_container_width=True, key="sc_clr_btn"):
+                st.session_state.screener_results = None
+                st.rerun()
 
-    st.caption(
-        f"📌 判定条件: ドンチャン{sc_donchian}日 ｜ "
-        f"遅延{sc_delay}日後に価格確認 ｜ "
-        f"待機DD > {sc_dd:.1f}% ｜ "
-        f"出来高 ≥ {sc_vol:.1f}×"
-    )
-
-    # ────────────────────────────────────────────────────────────────────────
-    # 銘柄リスト（マスタフィルター結果 / プリセット / CSV / 手動入力）
-    # ────────────────────────────────────────────────────────────────────────
-    st.markdown("### 📋 銘柄リスト")
-
-    # 銘柄マスタのフィルター結果を反映ボタン
-    if _filtered_count > 0:
-        if st.button(
-            f"📥 フィルター結果を反映（{_filtered_count:,} 銘柄）",
-            key="sc_import_master",
-            help="上記フィルター後の銘柄をテキストエリアに一括反映します",
-        ):
-            _codes = ", ".join(_filtered_tickers)
-            st.session_state.sc_ticker_input = _codes
-            st.session_state.sc_ticker_area  = _codes
-            st.success(f"✅ {_filtered_count:,} 銘柄を反映しました")
-
-    sc_preset_col, sc_csv_col = st.columns([0.45, 0.55])
-
-    with sc_preset_col:
-        sc_preset = st.selectbox(
-            "入力方法 / プリセット",
-            options=PRESET_OPTIONS,
-            key="sc_preset_select",
-        )
-
-    if sc_preset != st.session_state.sc_prev_preset:
-        if sc_preset == PRESET_OPTIONS[1]:
-            _ps = ", ".join(TOPIX100_TICKERS)
-            st.session_state.sc_ticker_input = _ps
-            st.session_state.sc_ticker_area  = _ps
-        elif sc_preset == PRESET_OPTIONS[2]:
-            _ps = ", ".join(NIKKEI225_TICKERS)
-            st.session_state.sc_ticker_input = _ps
-            st.session_state.sc_ticker_area  = _ps
-        st.session_state.sc_prev_preset = sc_preset
-
-    with sc_csv_col:
-        sc_uploaded = st.file_uploader(
-            "📂 銘柄CSVをアップロード",
-            type=["csv"],
-            key="sc_csv_uploader",
-            help=(
-                "ticker 列（例: 7203.T）または code 列（例: 7203）を含む CSV。\n"
-                "アップロードするとテキストエリアの内容を自動置換します。"
-            ),
-        )
-
-    if sc_uploaded is not None:
-        sc_file_id = getattr(sc_uploaded, "file_id", sc_uploaded.name)
-        if st.session_state.sc_csv_file_id != sc_file_id:
-            st.session_state.sc_csv_file_id = sc_file_id
-            csv_tickers, csv_err = _parse_screener_csv(sc_uploaded)
-            if csv_err:
-                st.error(f"❌ {csv_err}")
+        # ────────────────────────────────────────────────────────────────────────
+        # ④ スクリーニング実行
+        # ────────────────────────────────────────────────────────────────────────
+        if run_btn:
+            if not raw_list:
+                st.warning("銘柄コードを入力してください。")
             else:
-                ticker_str = ", ".join(csv_tickers)
-                st.session_state.sc_ticker_input = ticker_str
-                st.session_state.sc_ticker_area  = ticker_str
-                st.success(
-                    f"✅ CSV 読み込み成功 — **{len(csv_tickers)} 銘柄**をテキストエリアに反映しました。"
-                )
+                tickers = [normalize_ticker(t) for t in raw_list if t]
+                passed:  list[dict] = []
+                errors:  list[str]  = []
 
-    sc_ticker_input = st.text_area(
-        "銘柄コード（カンマ区切り）",
-        height=80,
-        key="sc_ticker_area",
-        label_visibility="collapsed",
-        help="4桁数字も可（7203 → 7203.T に自動変換）。マスタ反映後は手動編集も可能。",
-    )
-    if sc_preset == PRESET_OPTIONS[0] and sc_uploaded is None:
-        st.session_state.sc_ticker_input = sc_ticker_input
+                prog_bar  = st.progress(0, text=f"スクリーニング開始... (0 / {len(tickers)})")
+                status_ph = st.empty()
 
-    raw_list = [t.strip() for t in sc_ticker_input.split(",") if t.strip()]
-    st.caption(f"銘柄数: **{len(raw_list)}** 件")
+                for idx, ticker in enumerate(tickers):
+                    prog_bar.progress(
+                        idx / len(tickers),
+                        text=f"処理中... {idx + 1} / {len(tickers)} | 通過: {len(passed)} 銘柄",
+                    )
+                    status_ph.caption(f"🔍 {ticker} を分析中")
 
-    # ────────────────────────────────────────────────────────────────────────
-    # ③ 実行 / クリア ボタン
-    # ────────────────────────────────────────────────────────────────────────
-    run_col, clr_col, _ = st.columns([0.22, 0.10, 0.68])
-    with run_col:
-        run_btn = st.button(
-            "🚀 スクリーニング実行", use_container_width=True,
-            type="primary", key="sc_run_btn",
-        )
-    with clr_col:
-        if st.button("クリア", use_container_width=True, key="sc_clr_btn"):
-            st.session_state.screener_results = None
-            st.rerun()
+                    result, err = screen_ticker(
+                        ticker        = ticker,
+                        donchian_days = int(sc_donchian),
+                        vol_mult_thr  = float(sc_vol),
+                        delay_days    = int(sc_delay),
+                        dd_threshold  = float(sc_dd),
+                    )
 
-    # ────────────────────────────────────────────────────────────────────────
-    # ④ スクリーニング実行
-    # ────────────────────────────────────────────────────────────────────────
-    if run_btn:
-        if not raw_list:
-            st.warning("銘柄コードを入力してください。")
-        else:
-            tickers = [normalize_ticker(t) for t in raw_list if t]
-            passed:  list[dict] = []
-            errors:  list[str]  = []
+                    if result:
+                        passed.append(result)
+                    elif err:
+                        errors.append(f"{ticker}: {err}")
 
-            prog_bar  = st.progress(0, text=f"スクリーニング開始... (0 / {len(tickers)})")
-            status_ph = st.empty()
-
-            for idx, ticker in enumerate(tickers):
                 prog_bar.progress(
-                    idx / len(tickers),
-                    text=f"処理中... {idx + 1} / {len(tickers)} | 通過: {len(passed)} 銘柄",
+                    1.0,
+                    text=f"✅ 完了  {len(passed)} / {len(tickers)} 銘柄が条件を通過",
                 )
-                status_ph.caption(f"🔍 {ticker} を分析中")
+                status_ph.empty()
 
-                result, err = screen_ticker(
-                    ticker        = ticker,
-                    donchian_days = int(sc_donchian),
-                    vol_mult_thr  = float(sc_vol),
-                    delay_days    = int(sc_delay),
-                    dd_threshold  = float(sc_dd),
+                if passed:
+                    _master_name_map = {}
+                    if st.session_state.master is not None and "name" in st.session_state.master.columns:
+                        _master_name_map = dict(zip(
+                            st.session_state.master["code"].astype(str),
+                            st.session_state.master["name"]
+                        ))
+                    for row in passed:
+                        row["銘柄名"] = _master_name_map.get(str(row["ティッカー"])) or _get_stock_name(row["ティッカー"])
+
+                st.session_state.screener_results = (
+                    pd.DataFrame(passed) if passed else pd.DataFrame()
                 )
 
-                if result:
-                    passed.append(result)
-                elif err:
-                    errors.append(f"{ticker}: {err}")
+                if errors:
+                    with st.expander(f"⚠️ スキップされた銘柄 ({len(errors)} 件)"):
+                        for e in errors:
+                            st.caption(e)
 
-            prog_bar.progress(
-                1.0,
-                text=f"✅ 完了  {len(passed)} / {len(tickers)} 銘柄が条件を通過",
+        # ────────────────────────────────────────────────────────────────────────
+        # ⑤ 結果表示
+        # ────────────────────────────────────────────────────────────────────────
+        if st.session_state.screener_results is None:
+            return
+
+        results_df = st.session_state.screener_results
+        st.divider()
+
+        if results_df.empty:
+            st.info(
+                "🔍 条件を満たす銘柄は見つかりませんでした。"
+                "遅延日数を減らすか、DD閾値・出来高倍率を緩めてみてください。"
             )
-            status_ph.empty()
+            return
 
-            if passed:
-                _master_name_map = {}
-                if st.session_state.master is not None and "name" in st.session_state.master.columns:
-                    _master_name_map = dict(zip(
-                        st.session_state.master["code"].astype(str),
-                        st.session_state.master["name"]
-                    ))
-                for row in passed:
-                    row["銘柄名"] = _master_name_map.get(str(row["ティッカー"])) or _get_stock_name(row["ティッカー"])
+        st.success(f"✅ **{len(results_df)} 銘柄**が条件を通過しました")
 
-            st.session_state.screener_results = (
-                pd.DataFrame(passed) if passed else pd.DataFrame()
+        # ── 一括ファンダ追加ボタン ─────────────────────────────────────────────
+        _all_codes   = results_df["ティッカー"].dropna().tolist() if "ティッカー" in results_df.columns else []
+        _not_added   = [c for c in _all_codes if c not in st.session_state.funda_list]
+        if _not_added:
+            if st.button(f"📊 全 {len(_not_added)} 銘柄を一括でファンダ一覧に追加", key="sc_bulk_funda_add"):
+                with st.spinner(f"{len(_not_added)} 銘柄のデータを取得中..."):
+                    for _bc in _not_added:
+                        _bf = get_fundamentals(_bc)
+                        st.session_state.fund_df = pd.concat(
+                            [st.session_state.fund_df, pd.DataFrame([_bf])],
+                            ignore_index=True,
+                        ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
+                        if _bc not in st.session_state.funda_list:
+                            st.session_state.funda_list.append(_bc)
+                save_funda_data(st.session_state.fund_df)
+                st.success(f"✅ {len(_not_added)} 銘柄を追加しました")
+                st.rerun()
+        else:
+            st.info("スクリーニング結果の全銘柄が既にファンダ一覧に追加済みです。")
+
+        col_order = [
+            "ティッカー", "銘柄名", "現在価格",
+            "経過日数", "ブレイク比(%)",
+            "出来高倍率", "waiting_dd(%)", "delay日数",
+            "ブレイク日", "ブレイク価格", "エントリー価格",
+        ]
+        disp_df = results_df[[c for c in col_order if c in results_df.columns]].copy()
+
+        # ── ソートコントロール ─────────────────────────────────────────────────────
+        _sort_cols, _sort_dir_col = st.columns([2, 1])
+        with _sort_cols:
+            _sort_key = st.radio(
+                "並び替え",
+                options=["経過日数", "ブレイク比(%)"],
+                horizontal=True,
+                key="sc_sort_key",
             )
+        with _sort_dir_col:
+            _sort_asc = st.radio(
+                "順序",
+                options=["昇順 ▲", "降順 ▼"],
+                horizontal=True,
+                key="sc_sort_dir",
+            ) == "昇順 ▲"
+        if _sort_key in disp_df.columns:
+            disp_df = disp_df.sort_values(_sort_key, ascending=_sort_asc).reset_index(drop=True)
 
-            if errors:
-                with st.expander(f"⚠️ スキップされた銘柄 ({len(errors)} 件)"):
-                    for e in errors:
-                        st.caption(e)
+        def _dd_color(val):
+            try:
+                v = float(val)
+                return "color: #f44336; font-weight:bold" if v < -1.5 else "color: #4caf50"
+            except Exception:
+                return ""
 
-    # ────────────────────────────────────────────────────────────────────────
-    # ⑤ 結果表示
-    # ────────────────────────────────────────────────────────────────────────
-    if st.session_state.screener_results is None:
-        return
+        def _pct_color(val):
+            try:
+                v = float(val)
+                return "color: #4caf50; font-weight:bold" if v >= 0 else "color: #f44336; font-weight:bold"
+            except Exception:
+                return ""
 
-    results_df = st.session_state.screener_results
-    st.divider()
+        fmt_map = {
+            "現在価格":      "{:,.2f}",
+            "経過日数":      "{:.0f}日",
+            "ブレイク比(%)": "{:+.2f}%",
+            "出来高倍率":    "{:.2f}×",
+            "waiting_dd(%)": "{:+.2f}%",
+            "ブレイク価格":  "{:,.2f}",
+            "エントリー価格":"{:,.2f}",
+        }
+        fmt_map = {k: v for k, v in fmt_map.items() if k in disp_df.columns}
 
-    if results_df.empty:
-        st.info(
-            "🔍 条件を満たす銘柄は見つかりませんでした。"
-            "遅延日数を減らすか、DD閾値・出来高倍率を緩めてみてください。"
+        # ── スクリーニング結果テーブル（ファンダ追加ボタン付き）─────────────────────────
+        _SC_LABELS = ["ティッカー", "銘柄名", "現在価格", "経過日数", "ブレイク比(%)",
+                      "出来高倍率", "waiting_dd(%)", "delay日数", "ブレイク日", "ブレイク価格", "エントリー価格",
+                      "かぶたん", "理論株価", "チャート", "G", "＋"]
+        _SC_WIDTHS = [0.7, 1.2, 0.8, 0.6, 0.8, 0.7, 0.8, 0.5, 0.8, 0.8, 0.9, 0.7, 0.7, 0.6, 0.5, 0.5]
+        _sc_hdr = st.columns(_SC_WIDTHS)
+        for _hc, _lbl in zip(_sc_hdr, _SC_LABELS):
+            _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
+
+        for _, _row in disp_df.iterrows():
+            _rc   = st.columns(_SC_WIDTHS)
+            _code = str(_row.get("ティッカー", ""))
+            _in_list = _code in st.session_state.funda_list
+
+            _rc[0].write(_row.get("ティッカー", "—"))
+            _rc[1].write(_row.get("銘柄名", "—"))
+
+            _v = _row.get("現在価格")
+            _rc[2].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
+
+            _v = _row.get("経過日数")
+            _rc[3].write(f"{int(_v)}日" if pd.notna(_v) else "—")
+
+            _v = _row.get("ブレイク比(%)")
+            if pd.notna(_v):
+                _clr = "#4caf50" if _v >= 0 else "#f44336"
+                _rc[4].markdown(
+                    f'<span style="color:{_clr};font-weight:bold">{_v:+.2f}%</span>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                _rc[4].write("—")
+
+            _v = _row.get("出来高倍率")
+            _rc[5].write(f"{_v:.2f}×" if pd.notna(_v) else "—")
+
+            _v = _row.get("waiting_dd(%)")
+            if pd.notna(_v):
+                _clr = "#f44336" if _v < -1.5 else "#4caf50"
+                _rc[6].markdown(
+                    f'<span style="color:{_clr};font-weight:bold">{_v:+.2f}%</span>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                _rc[6].write("—")
+
+            _v = _row.get("delay日数")
+            _rc[7].write(f"{int(_v)}" if pd.notna(_v) else "—")
+
+            _rc[8].write(str(_row.get("ブレイク日", "—")))
+
+            _v = _row.get("ブレイク価格")
+            _rc[9].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
+
+            _v = _row.get("エントリー価格")
+            _rc[10].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
+
+            # 銘柄コード（4桁）を取得
+            _sc_clean = _code.replace(".T", "").replace(".t", "")
+
+            # かぶたん
+            with _rc[11]:
+                st.link_button("かぶたん", f"https://kabutan.jp/stock/news?code={_sc_clean}")
+
+            # 理論株価
+            with _rc[12]:
+                st.link_button("理論株価", f"https://kabubiz.com/riron/stock.php?c={_sc_clean}")
+
+            # TradingView チャート
+            with _rc[13]:
+                st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_sc_clean}")
+
+            # Google Finance
+            with _rc[14]:
+                st.link_button("G", f"https://www.google.com/finance/quote/{_sc_clean}:TYO?hl=ja")
+
+            # ファンダ追加
+            with _rc[15]:
+                if _in_list:
+                    st.success("✅", icon=None)
+                else:
+                    if st.button("＋", key=f"funda_{_code}"):
+                        with st.spinner(f"{_code} のデータを取得中..."):
+                            _fdata = get_fundamentals(_code)
+                        st.session_state.fund_df = pd.concat(
+                            [st.session_state.fund_df, pd.DataFrame([_fdata])],
+                            ignore_index=True,
+                        ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
+                        save_funda_data(st.session_state.fund_df)
+                        if _code not in st.session_state.funda_list:
+                            st.session_state.funda_list.append(_code)
+                        st.rerun()
+
+        st.download_button(
+            label="📥 CSV ダウンロード",
+            data=disp_df.to_csv(index=False, encoding="utf-8-sig"),
+            file_name="screening_result.csv",
+            mime="text/csv",
+            key="sc_csv_download",
         )
-        return
 
-    st.success(f"✅ **{len(results_df)} 銘柄**が条件を通過しました")
+        # ────────────────────────────────────────────────────────────────────────
+        # ⑥ ポジションサイズ計算
+        # ────────────────────────────────────────────────────────────────────────
+        st.divider()
+        st.markdown("### 💰 ポジションサイズ計算")
+        st.caption("スクリーニング通過銘柄のポジションサイズを一括計算します。")
 
-    # ── 一括ファンダ追加ボタン ─────────────────────────────────────────────
-    _all_codes   = results_df["ティッカー"].dropna().tolist() if "ティッカー" in results_df.columns else []
-    _not_added   = [c for c in _all_codes if c not in st.session_state.funda_list]
-    if _not_added:
-        if st.button(f"📊 全 {len(_not_added)} 銘柄を一括でファンダ一覧に追加", key="sc_bulk_funda_add"):
-            with st.spinner(f"{len(_not_added)} 銘柄のデータを取得中..."):
-                for _bc in _not_added:
-                    _bf = get_fundamentals(_bc)
-                    st.session_state.fund_df = pd.concat(
-                        [st.session_state.fund_df, pd.DataFrame([_bf])],
-                        ignore_index=True,
-                    ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
-                    if _bc not in st.session_state.funda_list:
-                        st.session_state.funda_list.append(_bc)
-            save_funda_data(st.session_state.fund_df)
-            st.success(f"✅ {len(_not_added)} 銘柄を追加しました")
+        ps1, ps2, ps3 = st.columns(3)
+        with ps1:
+            ps_capital = st.number_input(
+                "💴 総資金（円）",
+                min_value=100_000, max_value=1_000_000_000,
+                value=1_000_000, step=100_000, format="%d",
+                key="sc_ps_capital",
+            )
+        with ps2:
+            ps_risk_pct = st.slider(
+                "📊 リスク率（%）",
+                min_value=0.5, max_value=3.0, value=1.0, step=0.1,
+                format="%.1f%%",
+                key="sc_ps_risk",
+            )
+        with ps3:
+            ps_loss_pct = st.number_input(
+                "✂️ 損切り幅（%）",
+                min_value=0.5, max_value=20.0, value=5.0, step=0.5, format="%.1f",
+                key="sc_ps_loss",
+                help="エントリー価格からの損切り率（例: 5.0 → 5%下落で損切り）",
+            )
+
+        if "エントリー価格" in disp_df.columns:
+            pos_rows = []
+            for _, row in disp_df.iterrows():
+                ticker      = row["ティッカー"]
+                name        = row.get("銘柄名", ticker)
+                entry_price = float(row["エントリー価格"])
+                losscut     = entry_price * (1 - ps_loss_pct / 100)
+                risk_per_sh = entry_price - losscut
+                if risk_per_sh > 0:
+                    budget   = ps_capital * (ps_risk_pct / 100)
+                    shares   = int(budget / risk_per_sh)
+                    purchase = shares * entry_price
+                else:
+                    shares   = 0
+                    purchase = 0.0
+
+                pos_rows.append({
+                    "ティッカー":     ticker,
+                    "銘柄名":         name,
+                    "エントリー価格": round(entry_price, 2),
+                    "損切り価格":     round(losscut, 2),
+                    "推奨株数":       shares,
+                    "購入総額（円）": round(purchase, 0),
+                })
+
+            if pos_rows:
+                pos_df = pd.DataFrame(pos_rows)
+                st.dataframe(
+                    pos_df.style.format({
+                        "エントリー価格": "{:,.2f}",
+                        "損切り価格":     "{:,.2f}",
+                        "購入総額（円）": "¥{:,.0f}",
+                    }),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        st.divider()
+        st.markdown("#### ➕ ポジション計算タブへ追加")
+        if st.button(
+            "📋 通過銘柄を全てポジション計算タブへ追加",
+            type="secondary", key="sc_add_to_pos",
+        ):
+            added = 0
+            for _, r in results_df.iterrows():
+                ticker = r["ティッカー"]
+                target = next(
+                    (i for i in range(st.session_state.n_rows)
+                     if not st.session_state.df.at[i, "銘柄コード"]),
+                    None,
+                )
+                if target is None:
+                    add_row()
+                    target = st.session_state.n_rows - 1
+                st.session_state.df.at[target, "銘柄コード"]   = ticker
+                st.session_state.prev_tickers[target] = "__FORCE_FETCH__"
+                added += 1
+            st.toast(f"{added} 銘柄を追加しました。ポジション計算タブをご確認ください。", icon="✅")
             st.rerun()
-    else:
-        st.info("スクリーニング結果の全銘柄が既にファンダ一覧に追加済みです。")
 
-    col_order = [
-        "ティッカー", "銘柄名", "現在価格",
-        "経過日数", "ブレイク比(%)",
-        "出来高倍率", "waiting_dd(%)", "delay日数",
-        "ブレイク日", "ブレイク価格", "エントリー価格",
-    ]
-    disp_df = results_df[[c for c in col_order if c in results_df.columns]].copy()
+    with _sc_tab_macd:
+        st.markdown("### 📉 MACDゼロライン上抜けスクリーニング")
+        st.markdown("""
+        MACDがゼロラインを**下から上にクロス**した銘柄を抽出します。
+        - 📐 **MACD定義**: EMA(short) − EMA(long)
+        - 🎯 **クロス条件**: 前日 < 0 かつ 当日 > 0
+        - 🔢 **OR条件**: 選択したMACDのうち1つでも条件を満たせば通過
+        """)
+        st.divider()
 
-    # ── ソートコントロール ─────────────────────────────────────────────────────
-    _sort_cols, _sort_dir_col = st.columns([2, 1])
-    with _sort_cols:
-        _sort_key = st.radio(
-            "並び替え",
-            options=["経過日数", "ブレイク比(%)"],
-            horizontal=True,
-            key="sc_sort_key",
-        )
-    with _sort_dir_col:
-        _sort_asc = st.radio(
-            "順序",
-            options=["昇順 ▲", "降順 ▼"],
-            horizontal=True,
-            key="sc_sort_dir",
-        ) == "昇順 ▲"
-    if _sort_key in disp_df.columns:
-        disp_df = disp_df.sort_values(_sort_key, ascending=_sort_asc).reset_index(drop=True)
-
-    def _dd_color(val):
-        try:
-            v = float(val)
-            return "color: #f44336; font-weight:bold" if v < -1.5 else "color: #4caf50"
-        except Exception:
-            return ""
-
-    def _pct_color(val):
-        try:
-            v = float(val)
-            return "color: #4caf50; font-weight:bold" if v >= 0 else "color: #f44336; font-weight:bold"
-        except Exception:
-            return ""
-
-    fmt_map = {
-        "現在価格":      "{:,.2f}",
-        "経過日数":      "{:.0f}日",
-        "ブレイク比(%)": "{:+.2f}%",
-        "出来高倍率":    "{:.2f}×",
-        "waiting_dd(%)": "{:+.2f}%",
-        "ブレイク価格":  "{:,.2f}",
-        "エントリー価格":"{:,.2f}",
-    }
-    fmt_map = {k: v for k, v in fmt_map.items() if k in disp_df.columns}
-
-    # ── スクリーニング結果テーブル（ファンダ追加ボタン付き）─────────────────────────
-    _SC_LABELS = ["ティッカー", "銘柄名", "現在価格", "経過日数", "ブレイク比(%)",
-                  "出来高倍率", "waiting_dd(%)", "delay日数", "ブレイク日", "ブレイク価格", "エントリー価格",
-                  "かぶたん", "理論株価", "チャート", "G", "＋"]
-    _SC_WIDTHS = [0.7, 1.2, 0.8, 0.6, 0.8, 0.7, 0.8, 0.5, 0.8, 0.8, 0.9, 0.7, 0.7, 0.6, 0.5, 0.5]
-    _sc_hdr = st.columns(_SC_WIDTHS)
-    for _hc, _lbl in zip(_sc_hdr, _SC_LABELS):
-        _hc.markdown(f"<small><b>{_lbl}</b></small>", unsafe_allow_html=True)
-
-    for _, _row in disp_df.iterrows():
-        _rc   = st.columns(_SC_WIDTHS)
-        _code = str(_row.get("ティッカー", ""))
-        _in_list = _code in st.session_state.funda_list
-
-        _rc[0].write(_row.get("ティッカー", "—"))
-        _rc[1].write(_row.get("銘柄名", "—"))
-
-        _v = _row.get("現在価格")
-        _rc[2].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
-
-        _v = _row.get("経過日数")
-        _rc[3].write(f"{int(_v)}日" if pd.notna(_v) else "—")
-
-        _v = _row.get("ブレイク比(%)")
-        if pd.notna(_v):
-            _clr = "#4caf50" if _v >= 0 else "#f44336"
-            _rc[4].markdown(
-                f'<span style="color:{_clr};font-weight:bold">{_v:+.2f}%</span>',
-                unsafe_allow_html=True,
+        # ── MACD パラメータ設定 ───────────────────────────────────────────────
+        st.markdown("### ⚙️ MACDパラメータ")
+        _m1, _m2 = st.columns(2)
+        with _m1:
+            _macd_sel_520  = st.checkbox("MACD(5, 20)",  value=True,  key="macd_sel_520")
+            _macd_sel_2040 = st.checkbox("MACD(20, 40)", value=True,  key="macd_sel_2040")
+            _macd_sel_540  = st.checkbox("MACD(5, 40)",  value=False, key="macd_sel_540")
+        with _m2:
+            _macd_within = st.number_input(
+                "📅 上抜けから何日以内",
+                min_value=0, max_value=30, value=5, step=1,
+                key="macd_within_days",
+                help="ゼロライン上抜け発生からこの日数以内の銘柄を抽出します",
             )
-        else:
-            _rc[4].write("—")
 
-        _v = _row.get("出来高倍率")
-        _rc[5].write(f"{_v:.2f}×" if pd.notna(_v) else "—")
+        # 選択した MACD パラメータリスト
+        _selected_macd_params: list[tuple[int, int]] = []
+        if _macd_sel_520:  _selected_macd_params.append((5,  20))
+        if _macd_sel_2040: _selected_macd_params.append((20, 40))
+        if _macd_sel_540:  _selected_macd_params.append((5,  40))
 
-        _v = _row.get("waiting_dd(%)")
-        if pd.notna(_v):
-            _clr = "#f44336" if _v < -1.5 else "#4caf50"
-            _rc[6].markdown(
-                f'<span style="color:{_clr};font-weight:bold">{_v:+.2f}%</span>',
-                unsafe_allow_html=True,
-            )
-        else:
-            _rc[6].write("—")
+        if not _selected_macd_params:
+            st.warning("MACDを1つ以上選択してください")
 
-        _v = _row.get("delay日数")
-        _rc[7].write(f"{int(_v)}" if pd.notna(_v) else "—")
-
-        _rc[8].write(str(_row.get("ブレイク日", "—")))
-
-        _v = _row.get("ブレイク価格")
-        _rc[9].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
-
-        _v = _row.get("エントリー価格")
-        _rc[10].write(f"{_v:,.2f}" if pd.notna(_v) else "—")
-
-        # 銘柄コード（4桁）を取得
-        _sc_clean = _code.replace(".T", "").replace(".t", "")
-
-        # かぶたん
-        with _rc[11]:
-            st.link_button("かぶたん", f"https://kabutan.jp/stock/news?code={_sc_clean}")
-
-        # 理論株価
-        with _rc[12]:
-            st.link_button("理論株価", f"https://kabubiz.com/riron/stock.php?c={_sc_clean}")
-
-        # TradingView チャート
-        with _rc[13]:
-            st.link_button("📈", f"https://www.tradingview.com/chart/?symbol=TSE:{_sc_clean}")
-
-        # Google Finance
-        with _rc[14]:
-            st.link_button("G", f"https://www.google.com/finance/quote/{_sc_clean}:TYO?hl=ja")
-
-        # ファンダ追加
-        with _rc[15]:
-            if _in_list:
-                st.success("✅", icon=None)
-            else:
-                if st.button("＋", key=f"funda_{_code}"):
-                    with st.spinner(f"{_code} のデータを取得中..."):
-                        _fdata = get_fundamentals(_code)
-                    st.session_state.fund_df = pd.concat(
-                        [st.session_state.fund_df, pd.DataFrame([_fdata])],
-                        ignore_index=True,
-                    ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
-                    save_funda_data(st.session_state.fund_df)
-                    if _code not in st.session_state.funda_list:
-                        st.session_state.funda_list.append(_code)
-                    st.rerun()
-
-    st.download_button(
-        label="📥 CSV ダウンロード",
-        data=disp_df.to_csv(index=False, encoding="utf-8-sig"),
-        file_name="screening_result.csv",
-        mime="text/csv",
-        key="sc_csv_download",
-    )
-
-    # ────────────────────────────────────────────────────────────────────────
-    # ⑥ ポジションサイズ計算
-    # ────────────────────────────────────────────────────────────────────────
-    st.divider()
-    st.markdown("### 💰 ポジションサイズ計算")
-    st.caption("スクリーニング通過銘柄のポジションサイズを一括計算します。")
-
-    ps1, ps2, ps3 = st.columns(3)
-    with ps1:
-        ps_capital = st.number_input(
-            "💴 総資金（円）",
-            min_value=100_000, max_value=1_000_000_000,
-            value=1_000_000, step=100_000, format="%d",
-            key="sc_ps_capital",
-        )
-    with ps2:
-        ps_risk_pct = st.slider(
-            "📊 リスク率（%）",
-            min_value=0.5, max_value=3.0, value=1.0, step=0.1,
-            format="%.1f%%",
-            key="sc_ps_risk",
-        )
-    with ps3:
-        ps_loss_pct = st.number_input(
-            "✂️ 損切り幅（%）",
-            min_value=0.5, max_value=20.0, value=5.0, step=0.5, format="%.1f",
-            key="sc_ps_loss",
-            help="エントリー価格からの損切り率（例: 5.0 → 5%下落で損切り）",
+        st.caption(
+            f"📌 判定条件: {'／'.join(f'MACD({s},{l})' for s,l in _selected_macd_params)} ｜ "
+            f"上抜けから {_macd_within} 日以内"
         )
 
-    if "エントリー価格" in disp_df.columns:
-        pos_rows = []
-        for _, row in disp_df.iterrows():
-            ticker      = row["ティッカー"]
-            name        = row.get("銘柄名", ticker)
-            entry_price = float(row["エントリー価格"])
-            losscut     = entry_price * (1 - ps_loss_pct / 100)
-            risk_per_sh = entry_price - losscut
-            if risk_per_sh > 0:
-                budget   = ps_capital * (ps_risk_pct / 100)
-                shares   = int(budget / risk_per_sh)
-                purchase = shares * entry_price
-            else:
-                shares   = 0
-                purchase = 0.0
+        st.divider()
 
-            pos_rows.append({
-                "ティッカー":     ticker,
-                "銘柄名":         name,
-                "エントリー価格": round(entry_price, 2),
-                "損切り価格":     round(losscut, 2),
-                "推奨株数":       shares,
-                "購入総額（円）": round(purchase, 0),
-            })
+        # ── 銘柄リスト（ドンチャンと共有のフィルター結果も使用可能）───────────
+        st.markdown("### 📋 銘柄リスト")
 
-        if pos_rows:
-            pos_df = pd.DataFrame(pos_rows)
-            st.dataframe(
-                pos_df.style.format({
-                    "エントリー価格": "{:,.2f}",
-                    "損切り価格":     "{:,.2f}",
-                    "購入総額（円）": "¥{:,.0f}",
-                }),
+        if _filtered_count > 0:
+            if st.button(
+                f"📥 フィルター結果を反映（{_filtered_count:,} 銘柄）",
+                key="macd_import_master",
+                help="上部フィルター後の銘柄をMACDスクリーニングに反映します",
+            ):
+                _mcodes = ", ".join(_filtered_tickers)
+                st.session_state.macd_ticker_input = _mcodes
+                st.success(f"✅ {_filtered_count:,} 銘柄を反映しました")
+
+        _macd_ticker_raw = st.text_area(
+            "銘柄コード（カンマ区切り）",
+            value=st.session_state.get("macd_ticker_input", ""),
+            height=80,
+            key="macd_ticker_area",
+            placeholder="例: 7203, 9984, 6758, AAPL",
+            help="4桁数字は .T を自動付与します",
+        )
+        st.session_state.macd_ticker_input = _macd_ticker_raw
+
+        _macd_raw_list = [t.strip() for t in _macd_ticker_raw.split(",") if t.strip()]
+        st.caption(f"銘柄数: **{len(_macd_raw_list)}** 件")
+
+        # ── 実行 / クリア ボタン ───────────────────────────────────────────────
+        _m_run_col, _m_clr_col, _ = st.columns([0.22, 0.10, 0.68])
+        with _m_run_col:
+            _macd_run_btn = st.button(
+                "🚀 MACDスクリーニング実行",
                 use_container_width=True,
-                hide_index=True,
+                type="primary",
+                key="macd_run_btn",
+                disabled=not _selected_macd_params,
             )
+        with _m_clr_col:
+            if st.button("クリア", use_container_width=True, key="macd_clr_btn"):
+                st.session_state.macd_results = None
+                st.rerun()
 
-    st.divider()
-    st.markdown("#### ➕ ポジション計算タブへ追加")
-    if st.button(
-        "📋 通過銘柄を全てポジション計算タブへ追加",
-        type="secondary", key="sc_add_to_pos",
-    ):
-        added = 0
-        for _, r in results_df.iterrows():
-            ticker = r["ティッカー"]
-            target = next(
-                (i for i in range(st.session_state.n_rows)
-                 if not st.session_state.df.at[i, "銘柄コード"]),
-                None,
+        # ── スクリーニング実行 ─────────────────────────────────────────────────
+        if _macd_run_btn:
+            if not _macd_raw_list:
+                st.warning("銘柄コードを入力してください。")
+            else:
+                _macd_tickers = [normalize_ticker(t) for t in _macd_raw_list if t]
+                _macd_prog    = st.progress(0, text=f"MACD スクリーニング開始... (0 / {len(_macd_tickers)})")
+                _macd_status  = st.empty()
+
+                _macd_passed: list[dict] = []
+                _macd_errors: list[str]  = []
+
+                for _mi, _mt in enumerate(_macd_tickers):
+                    _macd_prog.progress(
+                        _mi / len(_macd_tickers),
+                        text=f"処理中... {_mi + 1} / {len(_macd_tickers)} | 通過: {len(_macd_passed)} 銘柄",
+                    )
+                    _macd_status.caption(f"🔍 {_mt} を分析中")
+
+                    try:
+                        _mdf = fetch_data_for_macd(_mt, period="1y")
+                        if _mdf is None or _mdf.empty:
+                            _macd_errors.append(f"{_mt}: データなし")
+                            continue
+
+                        _close   = _mdf["Close"].squeeze()
+                        _last_px = float(_close.iloc[-1])
+                        _row: dict = {
+                            "ティッカー": _mt,
+                            "最終価格":   round(_last_px, 2),
+                        }
+
+                        _hit     = False
+                        _any_ok  = False
+
+                        for _short, _long in _selected_macd_params:
+                            _col  = f"MACD({_short},{_long})"
+                            _ccol = f"上抜け日({_short},{_long})"
+
+                            if len(_close) < _long + 5:
+                                _row[_col]  = None
+                                _row[_ccol] = None
+                                continue
+
+                            _macd_s   = calc_macd(_close, _short, _long)
+                            _macd_val = round(float(_macd_s.iloc[-1]), 4)
+                            _row[_col] = _macd_val
+                            _any_ok = True
+
+                            _crossed, _cdate = detect_cross(_macd_s, int(_macd_within))
+                            _row[_ccol] = _cdate if _crossed else None
+                            if _crossed:
+                                _hit = True
+
+                        if not _any_ok:
+                            _macd_errors.append(f"{_mt}: MACD 計算不可")
+                            continue
+
+                        if _hit:
+                            _macd_passed.append(_row)
+
+                    except Exception as _me:
+                        _macd_errors.append(f"{_mt}: {_me}")
+
+                _macd_prog.progress(
+                    1.0,
+                    text=f"✅ 完了  {len(_macd_passed)} / {len(_macd_tickers)} 銘柄が条件を通過",
+                )
+                _macd_status.empty()
+
+                # 銘柄名付与
+                if _macd_passed:
+                    _mname_map = {}
+                    if st.session_state.master is not None and "name" in st.session_state.master.columns:
+                        _mname_map = dict(zip(
+                            st.session_state.master["code"].astype(str),
+                            st.session_state.master["name"],
+                        ))
+                    for _r in _macd_passed:
+                        _r["銘柄名"] = _mname_map.get(str(_r["ティッカー"])) or _get_stock_name(_r["ティッカー"])
+
+                st.session_state.macd_results = (
+                    pd.DataFrame(_macd_passed) if _macd_passed else pd.DataFrame()
+                )
+
+                if _macd_errors:
+                    with st.expander(f"⚠️ スキップされた銘柄 ({len(_macd_errors)} 件)"):
+                        for _em in _macd_errors:
+                            st.caption(_em)
+
+        # ── MACD 結果表示 ───────────────────────────────────────────────────
+        if st.session_state.get("macd_results") is None:
+            st.info(
+                "① 銘柄コードを入力\n"
+                "② MACDパラメータを選択\n"
+                "③「MACDスクリーニング実行」を押す"
             )
-            if target is None:
-                add_row()
-                target = st.session_state.n_rows - 1
-            st.session_state.df.at[target, "銘柄コード"]   = ticker
-            st.session_state.prev_tickers[target] = "__FORCE_FETCH__"
-            added += 1
-        st.toast(f"{added} 銘柄を追加しました。ポジション計算タブをご確認ください。", icon="✅")
-        st.rerun()
+        else:
+            _mresults_df = st.session_state.macd_results
+            st.divider()
+
+            if _mresults_df.empty:
+                st.info("🔍 条件を満たす銘柄は見つかりませんでした。日数条件を緩めるか銘柄を増やしてみてください。")
+            else:
+                st.success(f"✅ **{len(_mresults_df)} 銘柄**が条件を通過しました")
+
+                # 列順序の整理
+                _base_cols  = ["ティッカー", "銘柄名", "最終価格"]
+                _macd_cols  = [c for c in _mresults_df.columns if c.startswith("MACD(")]
+                _cross_cols = [c for c in _mresults_df.columns if c.startswith("上抜け日(")]
+                _col_order  = _base_cols + _macd_cols + _cross_cols
+                _mdisp_df   = _mresults_df[[c for c in _col_order if c in _mresults_df.columns]].copy()
+
+                # 上抜け日がある列をハイライト
+                def _highlight_cross(val):
+                    if val is not None and isinstance(val, str) and len(val) == 10:
+                        return "background-color: #d1fae5; color: #065f46; font-weight: 600"
+                    return ""
+
+                _m_styled = _mdisp_df.style.map(
+                    _highlight_cross,
+                    subset=[c for c in _cross_cols if c in _mdisp_df.columns],
+                ).format(
+                    {c: "{:.4f}" for c in _macd_cols if c in _mdisp_df.columns},
+                    na_rep="—",
+                )
+                st.dataframe(_m_styled, use_container_width=True, hide_index=True)
+
+                st.download_button(
+                    label="📥 CSV ダウンロード",
+                    data=_mdisp_df.to_csv(index=False, encoding="utf-8-sig"),
+                    file_name="macd_screening_result.csv",
+                    mime="text/csv",
+                    key="macd_csv_download",
+                )
+
+                # ポジション計算タブへ追加
+                st.divider()
+                st.markdown("#### ➕ ポジション計算タブへ追加")
+                if st.button(
+                    "📋 MACD通過銘柄を全てポジション計算タブへ追加",
+                    type="secondary", key="macd_add_to_pos",
+                ):
+                    _madd_cnt = 0
+                    for _, _mr in _mresults_df.iterrows():
+                        _mt2 = _mr["ティッカー"]
+                        _tgt = next(
+                            (i for i in range(st.session_state.n_rows)
+                             if not st.session_state.df.at[i, "銘柄コード"]),
+                            None,
+                        )
+                        if _tgt is None:
+                            add_row()
+                            _tgt = st.session_state.n_rows - 1
+                        st.session_state.df.at[_tgt, "銘柄コード"]   = _mt2
+                        st.session_state.prev_tickers[_tgt] = "__FORCE_FETCH__"
+                        _madd_cnt += 1
+                    st.toast(f"{_madd_cnt} 銘柄を追加しました。ポジション計算タブをご確認ください。", icon="✅")
+                    st.rerun()
 
 
 # ===========================================================================
@@ -6930,6 +7327,73 @@ def render_x_analysis_tab() -> None:
             except Exception as _e:
                 _fetch_placeholder.error(f"取得エラー: {_e}")
 
+        # ── 診断 ─────────────────────────────────────────────────────────────
+        with st.expander("🔍 接続診断", expanded=False):
+            st.caption("ログイン状態・API疎通を確認します（～60秒かかる場合があります）")
+            if st.button("診断を実行", key="x_diagnose_btn", use_container_width=True,
+                         disabled=not _logged_in):
+                with st.spinner("診断中..."):
+                    try:
+                        _diag = xc.diagnose()
+
+                        # ① ネットワーク疎通
+                        _net = _diag.get("network_x_com", "—")
+                        if _net.startswith("OK"):
+                            st.success(f"① x.com 接続: {_net}")
+                        else:
+                            st.error(f"① x.com 接続: {_net}")
+
+                        # ② アカウント状態
+                        st.markdown("**② アカウント状態**")
+                        for _a in _diag.get("accounts", []):
+                            _col_a, _col_b = st.columns([2, 3])
+                            with _col_a:
+                                _status_icon = "✅" if _a["active"] else "❌"
+                                st.markdown(f"{_status_icon} `@{_a['username']}`")
+                            with _col_b:
+                                if _a.get("error_msg"):
+                                    st.warning(f"error: {_a['error_msg']}")
+                                if _a.get("cookie_keys"):
+                                    st.caption(f"cookies: {', '.join(_a['cookie_keys'])}")
+                                else:
+                                    st.caption("⚠️ cookie なし")
+
+                        # ③ 直接API疎通テスト
+                        _direct = _diag.get("direct_api_test", "—")
+                        if _direct.startswith("OK"):
+                            st.success(f"③ Cookie直接APIテスト: 成功 ✅")
+                            with st.expander("詳細"):
+                                st.code(_direct)
+                        else:
+                            st.error(f"③ Cookie直接APIテスト: {_direct}")
+
+                        # ④ twscrape 経由テスト
+                        _tw_res = _diag.get("twscrape_test", "—")
+                        if _tw_res == "OK":
+                            st.success(f"④ twscrape APIテスト: 成功 ✅")
+                        else:
+                            st.warning(f"④ twscrape APIテスト: {_tw_res}")
+
+                        # テスト後アカウント状態
+                        _active_after = _diag.get("active_after_test", [])
+                        _err_after    = _diag.get("error_after_test", [])
+                        if _active_after:
+                            if all(_active_after):
+                                st.success("テスト後: アカウントはアクティブのまま ✅")
+                            else:
+                                st.error("⚠️ テスト後にアカウントが非アクティブになりました（Cookieが期限切れの可能性）")
+                            if _err_after:
+                                for _em in _err_after:
+                                    st.warning(f"error_msg: {_em}")
+
+                        # エラーがあれば全体表示
+                        if _diag.get("error"):
+                            st.error(_diag["error"])
+                    except concurrent.futures.TimeoutError:
+                        st.error("診断タイムアウト（60秒）")
+                    except Exception as _e:
+                        st.error(f"診断エラー: {_e}")
+
         st.divider()
 
         # ── DB 統計 ───────────────────────────────────────────────────────────
@@ -6999,7 +7463,7 @@ def render_x_analysis_tab() -> None:
 
         _styled = (
             _df.style
-            .applymap(_score_color, subset=["合計スコア", "平均スコア"])
+            .map(_score_color, subset=["合計スコア", "平均スコア"])
             .format({"合計スコア": "{:.1f}", "平均スコア": "{:.2f}"})
         )
         st.dataframe(_styled, use_container_width=True, hide_index=True, height=280)

@@ -16,11 +16,39 @@ x_fetch_log     : 取得履歴ログ
 from __future__ import annotations
 
 import asyncio
+import base64
 import concurrent.futures
 import os
 import re
+import secrets
 import sqlite3
 from typing import Optional
+
+
+# ── twscrape XClIdGen パッチ ────────────────────────────────────────────────
+# twscrape 0.17.0 の XClIdGen.create() は X の JS 解析に依存しているが、
+# X の JS 構造変更により IndexError で失敗する。
+# x-client-transaction-id の生成をランダム値で代替してバイパスする。
+def _patch_twscrape_xclid() -> None:
+    try:
+        from twscrape import queue_client as _qc
+
+        class _DummyXClIdGen:
+            def calc(self, method: str, path: str) -> str:
+                # X が要求する形式に近い base64 ランダム文字列
+                return base64.b64encode(secrets.token_bytes(48)).decode()
+
+        async def _dummy_get(cls_or_username, fresh=False):  # type: ignore
+            return _DummyXClIdGen()
+
+        _qc.XClIdGenStore.get = classmethod(  # type: ignore[attr-defined]
+            lambda cls, username, fresh=False: _dummy_get(username, fresh)
+        )
+    except Exception:
+        pass  # パッチ失敗しても続行
+
+
+_patch_twscrape_xclid()
 
 # ── パス ─────────────────────────────────────────────────────────────────────
 _DIR          = os.path.dirname(__file__)
@@ -207,10 +235,18 @@ async def _alogin_cookie(username: str, cookies: str) -> str:
     accounts = await api.pool.get_all()
     logged = [a for a in accounts if a.active and a.username == username]
     if not logged:
+        # DB から直接確認して詳細エラーを返す
+        all_accts = await api.pool.get_all()
+        this_acct = [a for a in all_accts if a.username == username]
+        detail = ""
+        if this_acct:
+            a = this_acct[0]
+            detail = f"\nactive={a.active}, error_msg={a.error_msg}, cookies={list(a.cookies.keys()) if a.cookies else '[]'}"
         raise RuntimeError(
             "Cookieの設定に失敗しました。\n"
             "・auth_token / ct0 の値をもう一度コピーし直してください\n"
             "・ブラウザでx.comを開き直してから再取得してください"
+            + detail
         )
     return f"Cookieログイン成功: @{logged[0].username}"
 
@@ -339,13 +375,110 @@ def _calc_score(like: int, rt: int, reply: int, text: str) -> float:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 async def _acollect_tweets(api, uid: int, limit: int = 100) -> list:
-    """非同期ジェネレータからツイートをリストに収集（タイムアウト付き）"""
+    """非同期ジェネレータからツイートをリストに収集"""
     tweets = []
     async for tw in api.user_tweets(uid, limit=limit):
         tweets.append(tw)
         if len(tweets) >= limit:
             break
     return tweets
+
+
+async def _adiagnose() -> dict:
+    """twscrape の状態を診断する"""
+    import urllib.request
+    from twscrape import API  # type: ignore
+    api = API(_TW_ACCT_DB)
+    result: dict = {}
+
+    # ── ① 基本ネットワーク疎通（twscrape不使用）─────────────────────────────
+    try:
+        req = urllib.request.Request(
+            "https://x.com",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result["network_x_com"] = f"OK (HTTP {resp.status})"
+    except Exception as e:
+        result["network_x_com"] = f"エラー: {type(e).__name__}: {e}"
+
+    # ── ② Cookieを使った直接API疎通テスト ────────────────────────────────────
+    accounts_pre = await api.pool.get_all()
+    result["accounts"] = [
+        {
+            "username": a.username,
+            "active": a.active,
+            "error_msg": a.error_msg,
+            "locks": {k: str(v) for k, v in (a.locks or {}).items()},
+            "has_cookies": bool(a.cookies),
+            "cookie_keys": list(a.cookies.keys()) if a.cookies else [],
+        }
+        for a in accounts_pre
+    ]
+
+    if not accounts_pre:
+        result["error"] = "ログイン済みアカウントがありません"
+        return result
+
+    active = [a for a in accounts_pre if a.active]
+    if not active:
+        result["error"] = f"アクティブなアカウントがありません。error_msg: {accounts_pre[0].error_msg}"
+        return result
+
+    # ── ③ Cookieで直接GraphQL疎通テスト ──────────────────────────────────────
+    acct = active[0]
+    if acct.cookies:
+        cookie_str = "; ".join(f"{k}={v}" for k, v in acct.cookies.items())
+        ct0 = acct.cookies.get("ct0", "")
+        try:
+            import json as _json
+            url = (
+                "https://api.twitter.com/graphql/SAMkL5y_N9pmahSw8yy6gA/UserByScreenName"
+                "?variables=%7B%22screen_name%22%3A%22twitter%22%7D"
+                "&features=%7B%22hidden_profile_subscriptions_enabled%22%3Atrue%7D"
+            )
+            req2 = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "*/*",
+                "Accept-Language": "ja,en;q=0.9",
+                "Cookie": cookie_str,
+                "x-csrf-token": ct0,
+                "authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+                "x-twitter-active-user": "yes",
+                "x-twitter-client-language": "ja",
+            })
+            with urllib.request.urlopen(req2, timeout=15) as resp2:
+                body = resp2.read(500).decode("utf-8", errors="replace")
+                result["direct_api_test"] = f"OK (HTTP {resp2.status}) - {body[:200]}"
+        except urllib.error.HTTPError as e:
+            body = e.read(300).decode("utf-8", errors="replace") if e.fp else ""
+            result["direct_api_test"] = f"HTTP {e.code}: {body[:200]}"
+        except Exception as e:
+            result["direct_api_test"] = f"エラー: {type(e).__name__}: {e}"
+    else:
+        result["direct_api_test"] = "Cookieなし - スキップ"
+
+    # ── ④ twscrape 経由テスト ────────────────────────────────────────────────
+    try:
+        test_user = await asyncio.wait_for(
+            api.user_by_login("twitter"), timeout=20
+        )
+        result["twscrape_test"] = "OK" if test_user else "None返却"
+    except asyncio.TimeoutError:
+        result["twscrape_test"] = "タイムアウト（20秒）"
+    except Exception as e:
+        result["twscrape_test"] = f"エラー: {type(e).__name__}: {e}"
+
+    # テスト後のアカウント状態
+    accounts_after = await api.pool.get_all()
+    result["active_after_test"] = [a.active for a in accounts_after]
+    result["error_after_test"] = [a.error_msg for a in accounts_after if a.error_msg]
+
+    return result
+
+
+def diagnose() -> dict:
+    return _run(_adiagnose(), timeout=60)
 
 
 async def _afetch_user(user: dict, noise: list[str], api) -> dict:
@@ -363,9 +496,29 @@ async def _afetch_user(user: dict, noise: list[str], api) -> dict:
                 _aresolve_user_id(api, uname), timeout=30
             )
         except asyncio.TimeoutError:
-            return {"error": f"@{uname} のユーザーID取得がタイムアウトしました（30秒）"}
+            # アカウントが非アクティブになっていないか確認
+            accts_now = await api.pool.get_all()
+            inactive = [a for a in accts_now if not a.active]
+            if inactive:
+                errs = [a.error_msg for a in inactive if a.error_msg]
+                detail = f"（{errs[0]}）" if errs else ""
+                return {"error": (
+                    f"@{uname} ユーザーID取得タイムアウト。"
+                    f"アカウントが非アクティブになりました{detail}。"
+                    "Cookieが期限切れの可能性があります。再ログインしてください。"
+                )}
+            return {"error": f"@{uname} のユーザーID取得がタイムアウトしました（30秒）。X側のレート制限かもしれません。"}
         except Exception as e:
-            return {"error": str(e)}
+            accts_now = await api.pool.get_all()
+            inactive = [a for a in accts_now if not a.active]
+            if inactive:
+                errs = [a.error_msg for a in inactive if a.error_msg]
+                detail = f"（{errs[0]}）" if errs else ""
+                return {"error": (
+                    f"@{uname}: APIエラー{detail}。"
+                    "Cookieが無効または期限切れです。ブラウザから再取得してログインし直してください。"
+                )}
+            return {"error": f"@{uname}: {e}"}
 
     uid = int(uid_str)
 
@@ -447,10 +600,34 @@ async def _afetch_user(user: dict, noise: list[str], api) -> dict:
 
 async def _afetch_all() -> dict[str, dict]:
     from twscrape import API  # type: ignore
+    from twscrape.db import execute  # type: ignore
     init_db()
     api   = API(_TW_ACCT_DB)
     users = get_users()
     noise = _get_noise_words()
+
+    if not users:
+        return {}
+
+    # ── ログイン済みアカウントの確認 ──────────────────────────────────────────
+    accounts = await api.pool.get_all()
+    active_accounts = [a for a in accounts if a.active]
+
+    if not accounts:
+        return {"_error": {"error": "Xアカウントがログインされていません。先にCookieでログインしてください。"}}
+
+    if not active_accounts:
+        # 全アカウントが非アクティブ → Cookie再ログインが必要
+        err_msgs = [a.error_msg for a in accounts if a.error_msg]
+        detail = f"（{err_msgs[0]}）" if err_msgs else ""
+        return {"_error": {
+            "error": (
+                f"アクティブなアカウントがありません{detail}。\n"
+                "CookieのログインでCookieが期限切れか無効の可能性があります。\n"
+                "ブラウザから auth_token と ct0 を再取得してCookieログインを再実行してください。"
+            )
+        }}
+
     results: dict[str, dict] = {}
     for user in users:
         results[user["username"]] = await _afetch_user(user, noise, api)
