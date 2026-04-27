@@ -2327,7 +2327,8 @@ def render_screener_tab() -> None:
             ):
                 _mcodes = ", ".join(_filtered_tickers)
                 st.session_state.macd_ticker_input = _mcodes
-                st.success(f"✅ {_filtered_count:,} 銘柄を反映しました")
+                st.session_state.macd_ticker_area  = _mcodes  # widget key に直接セット
+                st.rerun()
 
         _macd_ticker_raw = st.text_area(
             "銘柄コード（カンマ区切り）",
