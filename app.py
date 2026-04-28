@@ -2535,7 +2535,79 @@ def render_screener_tab() -> None:
                     {c: "{:.4f}" for c in _macd_cols if c in _mdisp_df.columns},
                     na_rep="—",
                 )
-                st.dataframe(_m_styled, use_container_width=True, hide_index=True)
+                # ── 一括追加ボタン（監視銘柄） ───────────────────────────────────
+                _m_all_codes  = _mresults_df["ティッカー"].dropna().tolist()
+                _m_not_in_wl  = [c for c in _m_all_codes if c not in st.session_state.funda_list]
+                if _m_not_in_wl:
+                    if st.button(
+                        f"📌 全 {len(_m_not_in_wl)} 銘柄を監視銘柄に一括追加",
+                        key="macd_bulk_wl_add", type="primary",
+                    ):
+                        with st.spinner(f"{len(_m_not_in_wl)} 銘柄のデータを取得中..."):
+                            _new_rows = [get_fundamentals(_c) for _c in _m_not_in_wl]
+                        st.session_state.fund_df = pd.concat(
+                            [st.session_state.fund_df, pd.DataFrame(_new_rows)],
+                            ignore_index=True,
+                        ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
+                        save_funda_data(st.session_state.fund_df)
+                        for _c in _m_not_in_wl:
+                            if _c not in st.session_state.funda_list:
+                                st.session_state.funda_list.append(_c)
+                        st.success(f"✅ {len(_m_not_in_wl)} 銘柄を監視銘柄に追加しました")
+                        st.rerun()
+                else:
+                    st.info("通過銘柄はすべて監視銘柄に追加済みです。")
+
+                # ── 銘柄ごとの行表示（＋ボタン付き）───────────────────────────
+                _m_hdr_cols = ["ティッカー", "銘柄名", "最終価格"] + _macd_cols + _cross_cols + ["監視銘柄"]
+                _m_widths   = [0.8, 1.2, 0.7] + [0.7] * len(_macd_cols) + [0.9] * len(_cross_cols) + [0.6]
+                _mh = st.columns(_m_widths)
+                for _mhc, _mhl in zip(_mh, _m_hdr_cols):
+                    _mhc.markdown(f"<small><b>{_mhl}</b></small>", unsafe_allow_html=True)
+
+                for _, _mr in _mdisp_df.iterrows():
+                    _mcols = st.columns(_m_widths)
+                    _mcode = str(_mr.get("ティッカー", ""))
+                    _in_wl = _mcode in st.session_state.funda_list
+
+                    _mcols[0].write(_mr.get("ティッカー", "—"))
+                    _mcols[1].write(_mr.get("銘柄名", "—"))
+
+                    _mpx = _mr.get("最終価格")
+                    _mcols[2].write(f"{_mpx:,.2f}" if pd.notna(_mpx) else "—")
+
+                    for _mi_col, _mc_name in enumerate(_macd_cols):
+                        _mv = _mr.get(_mc_name)
+                        _mcols[3 + _mi_col].write(f"{_mv:.4f}" if pd.notna(_mv) else "—")
+
+                    for _mi_col, _cc_name in enumerate(_cross_cols):
+                        _cv = _mr.get(_cc_name)
+                        if pd.notna(_cv) and _cv:
+                            _mcols[3 + len(_macd_cols) + _mi_col].markdown(
+                                f'<span style="background:#d1fae5;color:#065f46;'
+                                f'font-weight:600;padding:1px 4px;border-radius:4px;'
+                                f'font-size:12px">{_cv}</span>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            _mcols[3 + len(_macd_cols) + _mi_col].write("—")
+
+                    # ＋ボタン / 追加済みバッジ
+                    with _mcols[-1]:
+                        if _in_wl:
+                            st.success("✅", icon=None)
+                        else:
+                            if st.button("＋監視", key=f"macd_wl_{_mcode}"):
+                                with st.spinner(f"{_mcode} を追加中..."):
+                                    _fdata = get_fundamentals(_mcode)
+                                st.session_state.fund_df = pd.concat(
+                                    [st.session_state.fund_df, pd.DataFrame([_fdata])],
+                                    ignore_index=True,
+                                ).drop_duplicates(subset="code", keep="last").reset_index(drop=True)
+                                save_funda_data(st.session_state.fund_df)
+                                if _mcode not in st.session_state.funda_list:
+                                    st.session_state.funda_list.append(_mcode)
+                                st.rerun()
 
                 st.download_button(
                     label="📥 CSV ダウンロード",
@@ -2545,7 +2617,7 @@ def render_screener_tab() -> None:
                     key="macd_csv_download",
                 )
 
-                # ポジション計算タブへ追加
+                # ── ポジション計算タブへ追加 ─────────────────────────────────
                 st.divider()
                 st.markdown("#### ➕ ポジション計算タブへ追加")
                 if st.button(
