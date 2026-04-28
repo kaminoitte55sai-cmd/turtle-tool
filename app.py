@@ -193,6 +193,11 @@ _FILTER_KEYS = [
     "sc_industry_options",
     "sc_topix_only",
     "sc_topix_size",
+    "sc_mktcap_min",
+    "sc_mktcap_max",
+    "sc_roe_min",
+    "sc_roe_max",
+    "sc_vol_ratio_min",
 ]
 
 PRESET_OPTIONS = [
@@ -425,6 +430,16 @@ def init_state() -> None:
         st.session_state.sc_prev_preset   = PRESET_OPTIONS[0]
     if "sc_csv_file_id"   not in st.session_state:
         st.session_state.sc_csv_file_id   = None
+    if "sc_mktcap_min" not in st.session_state:
+        st.session_state["sc_mktcap_min"] = 0
+    if "sc_mktcap_max" not in st.session_state:
+        st.session_state["sc_mktcap_max"] = 0
+    if "sc_roe_min" not in st.session_state:
+        st.session_state["sc_roe_min"] = 0.0
+    if "sc_roe_max" not in st.session_state:
+        st.session_state["sc_roe_max"] = 0.0
+    if "sc_vol_ratio_min" not in st.session_state:
+        st.session_state["sc_vol_ratio_min"] = 0.0
 
     # フィルター設定をファイルから復元（保存済みの場合のみ上書き）
     if os.path.exists(FILTER_FILE):
@@ -812,6 +827,11 @@ def screen_ticker(
     vol_mult_thr:  float,
     delay_days:    int,
     dd_threshold:  float,
+    mktcap_min:    float = 0,
+    mktcap_max:    float = 0,
+    roe_min:       float = 0.0,
+    roe_max:       float = 0.0,
+    vol_ratio_min: float = 0.0,
 ) -> tuple[dict | None, str | None]:
     """
     時間フィルター＋待機DDフィルター付きブレイクアウトスクリーナー。
@@ -821,6 +841,9 @@ def screen_ticker(
         2. ブレイク日から delay_days 後の価格がブレイク価格を上回るか確認
         3. 待機期間中の最大下落が dd_threshold 以内か確認
         4. 出来高倍率が vol_mult_thr 以上か確認
+        5. 時価総額フィルター（億円）
+        6. ROEフィルター（%）
+        7. 出来高倍率フィルター（当日/20日平均）
 
     Returns:
         (metrics_dict, None) : 条件通過
@@ -905,6 +928,34 @@ def screen_ticker(
                 holidays=[str(_h) for _h in _holidays],
             ))
             _price_change  = (_today_price / bo_close - 1) * 100
+
+            # 時価総額フィルター
+            if mktcap_min > 0 or mktcap_max > 0:
+                _mktcap_oku, _ = _fetch_mktcap_roe(ticker)
+                if _mktcap_oku is None:
+                    return None, None
+                if mktcap_min > 0 and _mktcap_oku < mktcap_min:
+                    return None, None
+                if mktcap_max > 0 and _mktcap_oku > mktcap_max:
+                    return None, None
+
+            # ROEフィルター
+            if roe_min > 0 or roe_max > 0:
+                _, _roe_pct = _fetch_mktcap_roe(ticker)
+                if _roe_pct is None:
+                    return None, None
+                if roe_min > 0 and _roe_pct < roe_min:
+                    return None, None
+                if roe_max > 0 and _roe_pct > roe_max:
+                    return None, None
+
+            # 出来高倍率フィルター（当日出来高 / 過去20日平均）
+            if vol_ratio_min > 0:
+                if len(df) >= 21:
+                    _today_vol = float(df["Volume"].iloc[-1])
+                    _avg_vol_20 = float(df["Volume"].iloc[-21:-1].mean())
+                    if _avg_vol_20 > 0 and _today_vol / _avg_vol_20 < vol_ratio_min:
+                        return None, None
 
             return {
                 "ティッカー":      ticker,
@@ -1648,6 +1699,20 @@ def render_position_tab() -> None:
             st.warning(f"グラフ描画エラー: {_chart_err}")
 
 
+@st.cache_data(ttl=3600)
+def _fetch_mktcap_roe(ticker: str) -> "tuple[float | None, float | None]":
+    """Returns (market_cap_oku, roe_pct) for given ticker. None if unavailable."""
+    try:
+        info = yf.Ticker(ticker).info
+        mktcap = info.get("marketCap")
+        mktcap_oku = mktcap / 1e8 if mktcap else None  # convert to 億円
+        roe = info.get("returnOnEquity")
+        roe_pct = roe * 100 if roe is not None else None
+        return mktcap_oku, roe_pct
+    except Exception:
+        return None, None
+
+
 def render_screener_tab() -> None:
     st.title("🔍 スクリーニング")
 
@@ -1770,6 +1835,31 @@ def render_screener_tab() -> None:
         st.caption(f"フィルター後銘柄数: **{_filtered_count:,}** 件")
     else:
         st.caption("銘柄マスタ未取得 — マスタ更新後にフィルターが有効になります")
+
+    # ── 共通フィルター（時価総額・ROE・出来高倍率）──────────────────────────────
+    st.markdown("---")
+    st.markdown("**📊 共通フィルター（時価総額・ROE・出来高倍率）**")
+    _frow1, _frow2, _frow3 = st.columns([2, 2, 2])
+    with _frow1:
+        st.markdown("🏢 **時価総額（億円）**")
+        _mc1, _mc2 = st.columns(2)
+        with _mc1:
+            st.number_input("最小（億円）", min_value=0, value=int(st.session_state.get("sc_mktcap_min") or 0), step=100, key="sc_mktcap_min")
+        with _mc2:
+            st.number_input("最大（億円）", min_value=0, value=int(st.session_state.get("sc_mktcap_max") or 0), step=100, key="sc_mktcap_max")
+        st.caption("0 = 制限なし")
+    with _frow2:
+        st.markdown("📈 **ROE（%）**")
+        _r1, _r2 = st.columns(2)
+        with _r1:
+            st.number_input("最小（%）", min_value=0.0, value=float(st.session_state.get("sc_roe_min") or 0.0), step=1.0, format="%.1f", key="sc_roe_min")
+        with _r2:
+            st.number_input("最大（%）", min_value=0.0, value=float(st.session_state.get("sc_roe_max") or 0.0), step=1.0, format="%.1f", key="sc_roe_max")
+        st.caption("0 = 制限なし")
+    with _frow3:
+        st.markdown("📊 **出来高倍率**")
+        st.number_input("当日/20日平均 ≥", min_value=0.0, value=float(st.session_state.get("sc_vol_ratio_min") or 0.0), step=0.5, format="%.1f", key="sc_vol_ratio_min")
+        st.caption("0 = 制限なし")
 
     # フィルター設定の保存ボタン
     _fsave_col, _fload_info_col = st.columns([0.2, 0.8])
@@ -1978,6 +2068,11 @@ def render_screener_tab() -> None:
                         vol_mult_thr  = float(sc_vol),
                         delay_days    = int(sc_delay),
                         dd_threshold  = float(sc_dd),
+                        mktcap_min    = float(st.session_state.get("sc_mktcap_min") or 0),
+                        mktcap_max    = float(st.session_state.get("sc_mktcap_max") or 0),
+                        roe_min       = float(st.session_state.get("sc_roe_min") or 0.0),
+                        roe_max       = float(st.session_state.get("sc_roe_max") or 0.0),
+                        vol_ratio_min = float(st.session_state.get("sc_vol_ratio_min") or 0.0),
                     )
 
                     if result:
@@ -2468,7 +2563,42 @@ def render_screener_tab() -> None:
                             continue
 
                         if _hit:
-                            _macd_passed.append(_row)
+                            # 共通フィルター（時価総額・ROE・出来高倍率）
+                            _mc_min = float(st.session_state.get("sc_mktcap_min") or 0)
+                            _mc_max = float(st.session_state.get("sc_mktcap_max") or 0)
+                            _roe_mn = float(st.session_state.get("sc_roe_min") or 0.0)
+                            _roe_mx = float(st.session_state.get("sc_roe_max") or 0.0)
+                            _vr_min = float(st.session_state.get("sc_vol_ratio_min") or 0.0)
+
+                            _common_ok = True
+
+                            if _mc_min > 0 or _mc_max > 0:
+                                _mktcap_oku, _ = _fetch_mktcap_roe(_mt)
+                                if _mktcap_oku is None:
+                                    _common_ok = False
+                                elif _mc_min > 0 and _mktcap_oku < _mc_min:
+                                    _common_ok = False
+                                elif _mc_max > 0 and _mktcap_oku > _mc_max:
+                                    _common_ok = False
+
+                            if _common_ok and (_roe_mn > 0 or _roe_mx > 0):
+                                _, _roe_pct = _fetch_mktcap_roe(_mt)
+                                if _roe_pct is None:
+                                    _common_ok = False
+                                elif _roe_mn > 0 and _roe_pct < _roe_mn:
+                                    _common_ok = False
+                                elif _roe_mx > 0 and _roe_pct > _roe_mx:
+                                    _common_ok = False
+
+                            if _common_ok and _vr_min > 0:
+                                if _mdf is not None and "Volume" in _mdf.columns and len(_mdf) >= 21:
+                                    _td_vol  = float(_mdf["Volume"].iloc[-1])
+                                    _avg_vol = float(_mdf["Volume"].iloc[-21:-1].mean())
+                                    if _avg_vol > 0 and _td_vol / _avg_vol < _vr_min:
+                                        _common_ok = False
+
+                            if _common_ok:
+                                _macd_passed.append(_row)
 
                     except Exception as _me:
                         _macd_errors.append(f"{_mt}: {_me}")
