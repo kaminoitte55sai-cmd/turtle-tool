@@ -664,6 +664,51 @@ def recalc_row(i: int, capital: float, risk_pct: float, losscut_mult: float) -> 
     return changed
 
 
+def refresh_all_prev_close(capital: float, risk_pct: float, losscut_mult: float) -> tuple[int, int]:
+    """保有中の全ポジションの「前日終値」を yfinance から再取得して最新化する。
+
+    建玉時株価（エントリー価格）・ATR・ロスカットラインは変更せず、
+    前日終値のみ取り直して評価損益などの派生値を再計算する。
+    日本株で yfinance が失敗した場合は J-Quants にフォールバックする。
+
+    Returns
+    -------
+    (success, failed) : 更新成功した銘柄数と失敗した銘柄数
+    """
+    df    = st.session_state.df
+    n     = st.session_state.n_rows
+    _errs = st.session_state.setdefault("pos_fetch_errors", {})
+    success = failed = 0
+
+    for i in range(n):
+        ticker = normalize_ticker(str(df.at[i, "銘柄コード"] or "").strip())
+        if not ticker:
+            continue
+
+        japan     = is_japan_stock(ticker)
+        new_close = None
+        try:
+            new_close = fetch_market_data(ticker).close
+        except Exception as _yf_err:
+            # yfinance 失敗 → 日本株は J-Quants でリトライ
+            if japan:
+                _jq = _jquants_fetch_market_data(ticker.upper().replace(".T", ""))
+                if _jq is not None:
+                    new_close = _jq.close
+            if new_close is None:
+                _errs[ticker] = f"yfinance: {_yf_err}"
+                failed += 1
+                continue
+
+        df.at[i, "前日終値"] = _floor_jp(round(float(new_close), 2), japan)
+        recalc_row(i, capital, risk_pct, losscut_mult)
+        _errs.pop(ticker, None)
+        success += 1
+
+    save_state()
+    return success, failed
+
+
 # ===========================================================================
 # ポジション計算タブ: 行操作
 # ===========================================================================
@@ -1376,10 +1421,22 @@ def render_position_tab() -> None:
                 needs_rerun = True
         save_state()   # パラメータ変更で自動保存
 
-    _btn_r1, _btn_r2 = st.columns([0.12, 0.88])
+    _btn_r1, _btn_r2, _btn_r3 = st.columns([0.12, 0.22, 0.66])
     with _btn_r1:
         if st.button("➕ 行追加", use_container_width=True):
             add_row(); save_state(); st.rerun()
+    with _btn_r2:
+        if st.button(
+            "🔄 前日終値を更新",
+            use_container_width=True,
+            key="refresh_prevclose_btn",
+            help="保有中の全銘柄の前日終値を yfinance から取り直し、評価損益を再計算します。"
+                 "建玉時株価・ATR・ロスカットラインは変更しません。",
+        ):
+            with st.spinner("🔄 前日終値を更新中..."):
+                _ok_n, _ng_n = refresh_all_prev_close(capital, risk_pct, losscut_mult)
+            st.toast(f"前日終値を更新: 成功 {_ok_n} 銘柄 / 失敗 {_ng_n} 銘柄", icon="🔄")
+            st.rerun()
 
     # ── データ取得エラーを永続表示（rerun後も消えない） ──────────────────────
     _fetch_errs = st.session_state.get("pos_fetch_errors", {})
