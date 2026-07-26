@@ -66,16 +66,24 @@ with st.container(border=True):
     col_a, col_b = st.columns([1, 2])
     with col_a:
         run = st.button("🔄 自動取得", type="primary", use_container_width=True)
+        deep_history = st.checkbox(
+            "過去記事も探索する",
+            value=False,
+            help=(
+                "直近 1 か月より前まで遡ります。過去サイトマップを走査するため"
+                "数分〜十数分かかります。直近数週ぶんだけで良い場合はオフのままで結構です。"
+            ),
+        )
     with col_b:
         max_articles = st.slider(
             "1回の実行で取得する記事数の上限",
-            min_value=5,
+            min_value=1,
             max_value=120,
-            value=60,
-            step=5,
+            value=8,
+            step=1,
             help=(
                 "株探の robots.txt が Crawl-delay: 3 を指定しているため、"
-                "1記事あたり約3秒かかります。初回は時間に余裕を持って実行してください。"
+                "1記事あたり約3秒かかります。週次記事なので 8 ＝ 約8週ぶんです。"
             ),
         )
 
@@ -96,6 +104,7 @@ with st.container(border=True):
         articles, skipped = source.collect(
             known_ids=known,
             max_articles=max_articles,
+            deep_history=deep_history,
             progress_cb=_on_progress,
         )
 
@@ -175,14 +184,53 @@ st.divider()
 st.subheader("最新週")
 
 latest = db.load_latest_week()
+# 連続週数は全期間で計算する（期間フィルタで切ると連続が途切れて見えてしまうため）
+streaks = db.streak_summary()
+
 if latest.empty:
     st.info("最新週のデータがありません。")
 else:
     st.caption(f"記事日付： {latest['article_date'].iloc[0]}　（{len(latest)} 銘柄）")
-    view = latest.rename(
-        columns={"code": "コード", "name": "銘柄", "article_date": "取得日", "sector": "業種", "market": "市場"}
-    )[["コード", "銘柄", "業種", "市場", "取得日"]]
-    st.dataframe(view, use_container_width=True, hide_index=True)
+
+    view = (
+        latest.merge(
+            streaks[["code", "current_streak", "count"]], on="code", how="left"
+        )
+        .rename(
+            columns={
+                "code": "コード",
+                "name": "銘柄",
+                "article_date": "取得日",
+                "sector": "業種",
+                "market": "市場",
+                "current_streak": "連続",
+                "count": "通算",
+            }
+        )
+        # 連続週数の多い順 = 勢いが続いている銘柄が上に来る
+        .sort_values(["連続", "通算"], ascending=False, ignore_index=True)
+    )[["コード", "銘柄", "業種", "市場", "連続", "通算", "取得日"]]
+
+    # 何週連続で載っているかがひと目で分かるよう、最長記録をヘッドラインに出す
+    top = view.iloc[0]
+    n_multi = int((view["連続"] >= 2).sum())
+    k1, k2 = st.columns(2)
+    k1.metric("最長連続", f"{int(top['連続'])} 週連続", delta=f"{top['銘柄']}（{top['コード']}）")
+    k2.metric("2週以上連続", f"{n_multi} 銘柄", delta=f"最新週 {len(view)} 銘柄中")
+
+    st.dataframe(
+        view,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "連続": st.column_config.NumberColumn(
+                "連続", format="%d 週", help="最新週から遡って何週連続で掲載されているか"
+            ),
+            "通算": st.column_config.NumberColumn(
+                "通算", format="%d 回", help="収録範囲での掲載回数の合計"
+            ),
+        },
+    )
     st.download_button(
         "⬇ 最新週を CSV 保存",
         _csv(view),
@@ -236,7 +284,53 @@ st.download_button(
 st.divider()
 st.subheader("集計")
 
-tab_rank, tab_summary = st.tabs(["出現回数ランキング", "初登場日・直近登場日・登場回数"])
+tab_streak, tab_rank, tab_summary = st.tabs(
+    ["連続出現ランキング", "出現回数ランキング", "初登場日・直近登場日・登場回数"]
+)
+
+with tab_streak:
+    st.caption(
+        "「連続」は最新週から遡って何週続けて掲載されたか。最新週に載っていない銘柄は 0 です。"
+        "　※ 未収録の週を跨ぐ場合は連続とみなしません。"
+    )
+    streak_view = streaks.rename(
+        columns={
+            "code": "コード",
+            "name": "銘柄",
+            "current_streak": "連続",
+            "max_streak": "最長連続",
+            "count": "通算",
+            "first_seen": "初登場日",
+            "last_seen": "直近登場日",
+        }
+    )[["コード", "銘柄", "連続", "最長連続", "通算", "初登場日", "直近登場日"]]
+
+    only_active = st.checkbox("連続中の銘柄だけ表示（連続 ≥ 2）", value=True)
+    shown = streak_view[streak_view["連続"] >= 2] if only_active else streak_view
+
+    st.dataframe(
+        shown,
+        use_container_width=True,
+        hide_index=True,
+        height=420,
+        column_config={
+            "連続": st.column_config.ProgressColumn(
+                "連続",
+                format="%d 週",
+                min_value=0,
+                max_value=int(streak_view["最長連続"].max()) if not streak_view.empty else 1,
+            ),
+            "最長連続": st.column_config.NumberColumn("最長連続", format="%d 週"),
+            "通算": st.column_config.NumberColumn("通算", format="%d 回"),
+        },
+    )
+    st.download_button(
+        "⬇ 連続出現を CSV 保存",
+        _csv(shown),
+        file_name="上場来高値_連続出現.csv",
+        mime="text/csv",
+        key="dl_streak",
+    )
 
 with tab_rank:
     rank = db.ranking(period=period)

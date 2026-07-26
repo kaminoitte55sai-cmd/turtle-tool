@@ -341,6 +341,86 @@ def stock_summary(period: str = "全期間") -> pd.DataFrame:
         return pd.read_sql_query(sql, conn, params=params)
 
 
+def streak_summary(period: str = "全期間", gap_tolerance_days: int = 10) -> pd.DataFrame:
+    """銘柄ごとの「連続で登場した週数」を集計する。
+
+    返す列:
+        code / name / current_streak / max_streak / count / first_seen / last_seen
+
+    current_streak … 最新週から遡って何週連続で載り続けているか。
+                     最新週に載っていない銘柄は 0（＝連続記録が途切れた）。
+    max_streak     … 収録範囲での最長連続週数。
+
+    ■ 「連続」の判定について
+    単純に DB 内の記事日付を並べて隣同士を見ると、株探側の未収録期間
+    （modules/kabutan_high.py の docstring 参照）を跨いだ 2 週を
+    「連続」と誤判定してしまう。そこで記事日付が暦の上で
+    gap_tolerance_days 以内に隣接している場合のみ連続とみなす。
+    週次記事なので通常は 7 日、祝日等のズレを見込んで既定 10 日。
+    """
+    empty_cols = [
+        "code", "name", "current_streak", "max_streak", "count", "first_seen", "last_seen"
+    ]
+    df = load_history(period=period)
+    if df.empty:
+        return pd.DataFrame(columns=empty_cols)
+
+    # 週（記事日付）を新しい順に並べる
+    weeks = sorted(df["article_date"].unique(), reverse=True)
+    wdates = [datetime.strptime(w, "%Y-%m-%d").date() for w in weeks]
+
+    # 各週に載っていた銘柄コードの集合
+    members = {w: set(g["code"]) for w, g in df.groupby("article_date")}
+
+    # 隣接判定: adjacent[i] は weeks[i] と weeks[i+1] が暦上つながっているか
+    adjacent = [
+        (wdates[i] - wdates[i + 1]).days <= gap_tolerance_days for i in range(len(wdates) - 1)
+    ]
+
+    # 銘柄名は最新の記事日付のものを採用する
+    latest_name = df.sort_values("article_date").groupby("code")["name"].last()
+    counts = df.groupby("code").size()
+    first_seen = df.groupby("code")["article_date"].min()
+    last_seen = df.groupby("code")["article_date"].max()
+
+    rows = []
+    for code in df["code"].unique():
+        # --- 現在の連続週数（最新週から遡る） ---
+        current = 0
+        if code in members[weeks[0]]:
+            current = 1
+            for i in range(len(weeks) - 1):
+                if not adjacent[i]:
+                    break  # 暦が飛んでいる = 連続とみなさない
+                if code not in members[weeks[i + 1]]:
+                    break
+                current += 1
+
+        # --- 最長連続週数 ---
+        best = run = 0
+        for i, w in enumerate(weeks):
+            if i > 0 and not adjacent[i - 1]:
+                run = 0  # 未収録期間を跨いだのでリセット
+            run = run + 1 if code in members[w] else 0
+            best = max(best, run)
+
+        rows.append(
+            {
+                "code": code,
+                "name": latest_name[code],
+                "current_streak": current,
+                "max_streak": best,
+                "count": int(counts[code]),
+                "first_seen": first_seen[code],
+                "last_seen": last_seen[code],
+            }
+        )
+
+    return pd.DataFrame(rows, columns=empty_cols).sort_values(
+        ["current_streak", "max_streak", "count"], ascending=False, ignore_index=True
+    )
+
+
 def stats() -> dict:
     """画面ヘッダ用のサマリ値をまとめて返す。"""
     with get_conn() as conn:

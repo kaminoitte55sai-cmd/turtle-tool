@@ -372,6 +372,7 @@ def discover_candidates(
     known_ids: set[str],
     max_sitemaps: int = 13,
     want: int | None = None,
+    deep_history: bool = False,
     progress_cb=None,
 ) -> list[tuple[str, str]]:
     """対象記事の候補 [(article_id, 判定理由), ...] を新しい順に返す。
@@ -391,7 +392,9 @@ def discover_candidates(
 
     sitemaps = _sitemap_urls(fetcher)[:max_sitemaps]
     news_maps = [u for u in sitemaps if "sitemap-news" in u or "sitemap-day" in u]
-    prev_maps = [u for u in sitemaps if u not in news_maps]
+    # 経路3（過去サイトマップの走査）は 1 本あたり数 MB あり時間がかかるので、
+    # 直近数週ぶんが欲しいだけなら不要。明示的に要求されたときだけ走らせる。
+    prev_maps = [u for u in sitemaps if u not in news_maps] if deep_history else []
     total_steps = len(news_maps) + 1 + len(prev_maps)
     step = 0
 
@@ -468,6 +471,7 @@ def discover_candidates(
 def collect(
     known_ids: set[str] | None = None,
     max_articles: int = 80,
+    deep_history: bool = False,
     progress_cb=None,
 ):
     """対象記事を探索・取得して (成功記事リスト, スキップ情報) を返す。
@@ -475,6 +479,8 @@ def collect(
     引数:
         known_ids    : 取得済み記事 ID。ここに含まれる記事は取りに行かない。
         max_articles : 1 回の実行で取得する記事数の上限（実行時間の上限にもなる）。
+        deep_history : True にすると過去サイトマップまで走査して数か月前まで遡る。
+                       False（既定）なら直近 1 か月ぶんだけを短時間で取得する。
         progress_cb  : progress_cb(current, total, message) 形式のコールバック。
                        Streamlit の進捗バー更新に使う（UI 非依存）。
 
@@ -489,7 +495,11 @@ def collect(
 
     # --- 1) 候補の探索 ---
     candidates = discover_candidates(
-        fetcher, known_ids, want=max_articles, progress_cb=progress_cb
+        fetcher,
+        known_ids,
+        want=max_articles,
+        deep_history=deep_history,
+        progress_cb=progress_cb,
     )
     candidates = candidates[:max_articles]
     total = len(candidates)
