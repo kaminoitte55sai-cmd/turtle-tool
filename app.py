@@ -7456,8 +7456,9 @@ def main() -> None:
     </style>
     """, unsafe_allow_html=True)
 
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab_high, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "🔍 スクリーニング",
+        "📈 上場来高値",
         "👀 監視銘柄",
         "💼 ポジション管理",
         "📈 バックテスト",
@@ -7467,6 +7468,11 @@ def main() -> None:
 
     with tab1:
         render_screener_tab()
+
+    with tab_high:
+        from modules import high_ui
+
+        high_ui.render()
 
     with tab2:
         render_funda_tab()
