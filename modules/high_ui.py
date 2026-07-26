@@ -19,6 +19,8 @@ app.py のタブから `high_ui.render()` として呼ばれる。
 
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import streamlit as st
 
@@ -36,100 +38,137 @@ def _csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
+def _is_streamlit_cloud() -> bool:
+    """Streamlit Community Cloud 上で動いているかを推定する。
+
+    Cloud からは株探へ到達できない（全リクエストが HTTP 405）ため、
+    押しても必ず失敗するボタンを主導線に置かないための判定。
+    誤判定しても取得手段は失われない（下の expander から実行できる）。
+    """
+    if os.path.abspath(__file__).startswith("/mount/src"):
+        return True  # Community Cloud はリポジトリを /mount/src 配下へ展開する
+    return os.name != "nt" and os.environ.get("HOME", "").startswith("/home/appuser")
+
+
 def _render_fetch_box() -> None:
-    """「自動取得」ブロック。取得 -> DB 反映 -> 結果表示までを担当する。"""
+    """データ更新ブロック。実行環境に応じて案内と取得UIを出し分ける。"""
     with st.container(border=True):
-        st.subheader("自動取得")
+        st.subheader("データ更新")
 
-        col_a, col_b = st.columns([1, 2])
-        with col_a:
-            run = st.button(
-                "🔄 自動取得", type="primary", use_container_width=True, key="high_run"
-            )
-            deep_history = st.checkbox(
-                "過去記事も探索する",
-                value=False,
-                key="high_deep",
-                help=(
-                    "直近 1 か月より前まで遡ります。過去サイトマップを走査するため"
-                    "数分〜十数分かかります。直近数週ぶんだけで良い場合はオフのままで結構です。"
-                ),
-            )
-        with col_b:
-            max_articles = st.slider(
-                "1回の実行で取得する記事数の上限",
-                min_value=1,
-                max_value=120,
-                value=8,
-                step=1,
-                key="high_max",
-                help=(
-                    "株探の robots.txt が Crawl-delay: 3 を指定しているため、"
-                    "1記事あたり約3秒かかります。週次記事なので 8 ＝ 約8週ぶんです。"
-                ),
-            )
-
-        if not run:
+        if not _is_streamlit_cloud():
+            _render_fetch_controls()
             return
 
-        progress = st.progress(0.0, text="準備中…")
-        status = st.empty()
+        # --- Cloud 上: 取得は必ず失敗するので、先にローカル実行を案内する ---
+        st.info(
+            "株探はこのサイト（Streamlit Cloud）からのアクセスを拒否するため、"
+            "画面からの取得はできません。\n\n"
+            "お手元の PC で次を実行すると、取得したデータがこの画面へ自動で反映されます。"
+        )
+        st.code(
+            "cd C:\\Users\\トシヒロ\\Desktop\\turtle_tool\n"
+            "python update_high_history.py",
+            language="bat",
+        )
+        st.caption(
+            "週次記事なので、土曜以降に実行すると1週ぶん増えます。"
+            "過去に遡りたいときは末尾に --deep を付けてください。"
+        )
+        with st.expander("それでもこの画面から取得を試す"):
+            _render_fetch_controls()
 
-        def _on_progress(current: int, total: int, message: str) -> None:
-            """kabutan_high から呼ばれる進捗コールバック（UI 側の関心事）。"""
-            ratio = 0.0 if total <= 0 else min(current / total, 1.0)
-            progress.progress(ratio, text=message)
 
-        source = kabutan_high
-
-        # 取得処理本体。通信エラーはモジュール内でリトライ／スキップされ、
-        # ここまで例外は上がってこない（＝途中で止まらない）。
-        articles, skipped, diag = source.collect(
-            known_ids=db.known_article_ids(),
-            known_dates=db.known_article_dates(),
-            max_articles=max_articles,
-            deep_history=deep_history,
-            progress_cb=_on_progress,
+def _render_fetch_controls() -> None:
+    """取得ボタン本体。取得 -> DB 反映 -> 結果表示までを担当する。"""
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        run = st.button(
+            "🔄 自動取得", type="primary", use_container_width=True, key="high_run"
+        )
+        deep_history = st.checkbox(
+            "過去記事も探索する",
+            value=False,
+            key="high_deep",
+            help=(
+                "直近 1 か月より前まで遡ります。過去サイトマップを走査するため"
+                "数分〜十数分かかります。直近数週ぶんだけで良い場合はオフのままで結構です。"
+            ),
+        )
+    with col_b:
+        max_articles = st.slider(
+            "1回の実行で取得する記事数の上限",
+            min_value=1,
+            max_value=120,
+            value=8,
+            step=1,
+            key="high_max",
+            help=(
+                "株探の robots.txt が Crawl-delay: 3 を指定しているため、"
+                "1記事あたり約3秒かかります。週次記事なので 8 ＝ 約8週ぶんです。"
+            ),
         )
 
-        # --- DB へ反映 ---
-        added_rows = 0
-        for art in articles:
-            added_rows += db.insert_rows(art.to_rows())
-            db.record_article(
-                art.article_id, art.url, art.article_date, art.title, len(art.stocks), "ok"
-            )
-        # 対象外・取得失敗だった候補も記録して、次回の再取得を防ぐ
-        for sk in skipped:
-            db.record_article(sk["article_id"], sk["url"], "", "", 0, sk["reason"][:40])
+    if not run:
+        return
 
-        updated_at = db.touch_updated_at()
-        pushed = db.push_snapshot()
+    progress = st.progress(0.0, text="準備中…")
+    status = st.empty()
 
-        progress.progress(1.0, text="完了")
+    def _on_progress(current: int, total: int, message: str) -> None:
+        """kabutan_high から呼ばれる進捗コールバック（UI 側の関心事）。"""
+        ratio = 0.0 if total <= 0 else min(current / total, 1.0)
+        progress.progress(ratio, text=message)
 
-        if articles:
-            status.success(
-                f"取得完了： 新規記事 {len(articles)} 件 / 追加銘柄 {added_rows} 件"
-                + (f" / スキップ {len(skipped)} 件" if skipped else "")
-            )
-            if pushed:
-                st.caption("✅ GitHub スナップショットへ保存しました（再起動後も保持されます）")
-        elif diag["ok"] == 0 and diag["requests"] > 0:
-            # 1件も 200 が返っていない = 実行環境から株探へ到達できていない。
-            # 「新着なし」と区別できるよう、はっきり失敗として出す。
-            status.error(
-                f"株探へアクセスできませんでした（{diag['requests']} 回試行して成功 0 回）。\n\n"
-                f"エラー内訳: {diag['errors']}\n\n"
-                "株探は Streamlit Cloud からのアクセスを拒否します。"
-                "ローカルで `python update_high_history.py` を実行してください。"
-            )
-        else:
-            status.info(
-                f"新しい記事はありませんでした。"
-                f"（リクエスト {diag['requests']} 回 / 成功 {diag['ok']} 回 / "
-                f"候補 {diag['candidates']} 件）"
-            )
+    source = kabutan_high
+
+    # 取得処理本体。通信エラーはモジュール内でリトライ／スキップされ、
+    # ここまで例外は上がってこない（＝途中で止まらない）。
+    articles, skipped, diag = source.collect(
+        known_ids=db.known_article_ids(),
+        known_dates=db.known_article_dates(),
+        max_articles=max_articles,
+        deep_history=deep_history,
+        progress_cb=_on_progress,
+    )
+
+    # --- DB へ反映 ---
+    added_rows = 0
+    for art in articles:
+        added_rows += db.insert_rows(art.to_rows())
+        db.record_article(
+            art.article_id, art.url, art.article_date, art.title, len(art.stocks), "ok"
+        )
+    # 対象外・取得失敗だった候補も記録して、次回の再取得を防ぐ
+    for sk in skipped:
+        db.record_article(sk["article_id"], sk["url"], "", "", 0, sk["reason"][:40])
+
+    updated_at = db.touch_updated_at()
+    pushed = db.push_snapshot()
+
+    progress.progress(1.0, text="完了")
+
+    if articles:
+        status.success(
+            f"取得完了： 新規記事 {len(articles)} 件 / 追加銘柄 {added_rows} 件"
+            + (f" / スキップ {len(skipped)} 件" if skipped else "")
+        )
+        if pushed:
+            st.caption("✅ GitHub スナップショットへ保存しました（再起動後も保持されます）")
+    elif diag["ok"] == 0 and diag["requests"] > 0:
+        # 1件も 200 が返っていない = 実行環境から株探へ到達できていない。
+        # 「新着なし」と区別できるよう、はっきり失敗として出す。
+        status.error(
+            f"株探へアクセスできませんでした（{diag['requests']} 回試行して成功 0 回）。\n\n"
+            f"エラー内訳: {diag['errors']}\n\n"
+            "株探は Streamlit Cloud からのアクセスを拒否します。"
+            "ローカルで `python update_high_history.py` を実行してください。"
+        )
+    else:
+        status.info(
+            f"新しい記事はありませんでした。"
+            f"（リクエスト {diag['requests']} 回 / 成功 {diag['ok']} 回 / "
+            f"候補 {diag['candidates']} 件）"
+        )
 
 
 def _render_latest_week(streaks: pd.DataFrame) -> None:
