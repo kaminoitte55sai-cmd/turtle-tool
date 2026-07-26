@@ -472,6 +472,13 @@ def push_snapshot() -> bool:
     if not token:
         return False  # ローカル実行時は何もしない
 
+    # 空の DB でスナップショットを上書きしない。
+    # 取得に失敗した回や復元前の起動で空を push すると、
+    # せっかく貯めた履歴を消してしまうため。
+    with get_conn() as conn:
+        if conn.execute("SELECT COUNT(*) c FROM high_history").fetchone()["c"] == 0:
+            return False
+
     try:
         with get_conn() as conn:
             hist = pd.read_sql_query(

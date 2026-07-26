@@ -101,7 +101,7 @@ with st.container(border=True):
 
         # 取得処理本体。通信エラーはモジュール内でリトライ／スキップされ、
         # ここまで例外は上がってこない（＝途中で止まらない）。
-        articles, skipped = source.collect(
+        articles, skipped, diag = source.collect(
             known_ids=known,
             max_articles=max_articles,
             deep_history=deep_history,
@@ -137,10 +137,28 @@ with st.container(border=True):
             "updated_at": updated_at,
             "pushed": pushed,
         }
-        status.success(
-            f"取得完了： 新規記事 {len(articles)} 件 / 追加銘柄 {added_rows} 件"
-            + (f" / スキップ {len(skipped)} 件" if skipped else "")
-        )
+        if articles:
+            status.success(
+                f"取得完了： 新規記事 {len(articles)} 件 / 追加銘柄 {added_rows} 件"
+                + (f" / スキップ {len(skipped)} 件" if skipped else "")
+            )
+        elif diag["ok"] == 0 and diag["requests"] > 0:
+            # 1件も 200 が返っていない = 実行環境から株探へ到達できていない。
+            # 「新着なし」と区別できるよう、はっきり失敗として出す。
+            status.error(
+                f"株探へアクセスできませんでした（{diag['requests']} 回試行して成功 0 回）。\n\n"
+                f"エラー内訳: {diag['errors']}\n\n"
+                "Streamlit Cloud のIPが拒否されている可能性があります。"
+                "その場合はローカル環境で取得してください。"
+            )
+        else:
+            status.info(
+                f"新しい記事はありませんでした。"
+                f"（リクエスト {diag['requests']} 回 / 成功 {diag['ok']} 回 / "
+                f"候補 {diag['candidates']} 件）"
+            )
+            if diag["errors"]:
+                st.caption(f"通信エラー内訳: {diag['errors']}")
 
 # --- 直近の取得結果（st.metric） ---
 res = st.session_state.get("high_last_result")

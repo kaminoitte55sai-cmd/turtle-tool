@@ -48,7 +48,7 @@ import datetime as dt
 import html
 import re
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 
 import requests
@@ -176,6 +176,12 @@ class Fetcher:
         self.delay = delay
         self.retries = retries
         self._last_request_at = 0.0
+        # 失敗の理由を必ず記録する。握りつぶすと「0件でした」としか出せず、
+        # 実行環境からアクセスが弾かれているのか、単に新着が無いのか区別できない。
+        self.n_requests = 0
+        self.n_ok = 0
+        self.errors: Counter = Counter()  # '403' / 'Timeout' などの内訳
+        self.last_error: str | None = None
 
     def _wait(self) -> None:
         """前回リクエストから delay 秒あける。"""
@@ -187,18 +193,24 @@ class Fetcher:
         """本文を返す。全リトライが失敗したら None（呼び出し側でスキップ）。"""
         for attempt in range(self.retries):
             self._wait()
+            self.n_requests += 1
             try:
                 r = self.session.get(url, timeout=timeout)
                 self._last_request_at = time.monotonic()
                 if r.status_code == 200:
                     # 株探は UTF-8 だが requests の推定が外れることがあるため明示する
                     r.encoding = "utf-8"
+                    self.n_ok += 1
                     return r.text
+                self.errors[f"HTTP {r.status_code}"] += 1
+                self.last_error = f"HTTP {r.status_code} : {url}"
                 # 404 は「記事が存在しない」= リトライ不要
                 if r.status_code == 404:
                     return None
-            except requests.RequestException:
+            except requests.RequestException as e:
                 self._last_request_at = time.monotonic()
+                self.errors[type(e).__name__] += 1
+                self.last_error = f"{type(e).__name__} : {url}"
             # 指数バックオフ（通信エラー時のリトライ）
             if attempt < self.retries - 1:
                 time.sleep(self.delay * (attempt + 1))
@@ -474,7 +486,11 @@ def collect(
     deep_history: bool = False,
     progress_cb=None,
 ):
-    """対象記事を探索・取得して (成功記事リスト, スキップ情報) を返す。
+    """対象記事を探索・取得して (成功記事リスト, スキップ情報, 診断情報) を返す。
+
+    診断情報 diag には実際に投げたリクエスト数と失敗の内訳が入る。
+    取得 0 件だったときに「新着が無い」のか「実行環境から株探へ到達できない」
+    のかを呼び出し側で区別できるようにするためのもの。
 
     引数:
         known_ids    : 取得済み記事 ID。ここに含まれる記事は取りに行かない。
@@ -493,6 +509,15 @@ def collect(
     articles: list[Article] = []
     skipped: list[dict] = []
 
+    def _diag(n_candidates: int) -> dict:
+        return {
+            "requests": fetcher.n_requests,
+            "ok": fetcher.n_ok,
+            "errors": dict(fetcher.errors),
+            "last_error": fetcher.last_error,
+            "candidates": n_candidates,
+        }
+
     # --- 1) 候補の探索 ---
     candidates = discover_candidates(
         fetcher,
@@ -505,7 +530,7 @@ def collect(
     total = len(candidates)
 
     if total == 0:
-        return articles, skipped
+        return articles, skipped, _diag(0)
 
     # --- 2) 候補を 1 件ずつ取得・判定 ---
     for i, (article_id, reason) in enumerate(candidates):
@@ -536,4 +561,4 @@ def collect(
     if progress_cb:
         progress_cb(total, total, "完了")
 
-    return articles, skipped
+    return articles, skipped, _diag(total)
