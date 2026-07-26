@@ -103,6 +103,7 @@ with st.container(border=True):
         # ここまで例外は上がってこない（＝途中で止まらない）。
         articles, skipped, diag = source.collect(
             known_ids=known,
+            known_dates=db.known_article_dates(),
             max_articles=max_articles,
             deep_history=deep_history,
             progress_cb=_on_progress,

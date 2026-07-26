@@ -382,6 +382,7 @@ def _discover_from_date_pages(
 def discover_candidates(
     fetcher: Fetcher,
     known_ids: set[str],
+    known_dates: set[str] | None = None,
     max_sitemaps: int = 13,
     want: int | None = None,
     deep_history: bool = False,
@@ -396,6 +397,7 @@ def discover_candidates(
     読まずに打ち切る。サイトマップは新しい順に並べてあるため、
     週次の増分実行では最初の 1 本（sitemap-news1）だけで済むことが多い。
     """
+    known_dates = known_dates or set()
     candidates: list[tuple[str, str]] = []
     seen_ids: set[str] = set()
 
@@ -465,6 +467,8 @@ def discover_candidates(
             per_day[aid[:8]].append((len(codes), aid))
 
         for _day, lst in sorted(per_day.items(), reverse=True):
+            if _day in known_dates:
+                continue  # その日の本命記事は取得済み。別候補を試す必要はない。
             lst.sort(reverse=True)  # 銘柄数の多い順
             for _n, aid in lst[:TOP_N_PER_DAY]:
                 key = f"n{aid}"
@@ -482,6 +486,7 @@ def discover_candidates(
 
 def collect(
     known_ids: set[str] | None = None,
+    known_dates: set[str] | None = None,
     max_articles: int = 80,
     deep_history: bool = False,
     progress_cb=None,
@@ -504,6 +509,7 @@ def collect(
     途中で例外を投げて止まることはない。
     """
     known_ids = known_ids or set()
+    known_dates = known_dates or set()
     fetcher = Fetcher()
 
     articles: list[Article] = []
@@ -522,6 +528,7 @@ def collect(
     candidates = discover_candidates(
         fetcher,
         known_ids,
+        known_dates=known_dates,
         want=max_articles,
         deep_history=deep_history,
         progress_cb=progress_cb,

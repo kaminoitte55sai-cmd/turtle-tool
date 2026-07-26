@@ -163,6 +163,20 @@ def known_article_ids() -> set[str]:
     return {r["article_id"] for r in rows}
 
 
+def known_article_dates() -> set[str]:
+    """対象記事の取得に成功済みの日付を 'YYYYMMDD' 形式で返す。
+
+    その日の本命記事が既に手元にあるなら、同じ日の別候補を
+    探索し直す必要はない。スクレイパ側の無駄打ちを防ぐために使う。
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT article_date FROM fetched_articles "
+            "WHERE status = 'ok' AND article_date <> ''"
+        ).fetchall()
+    return {r["article_date"].replace("-", "") for r in rows}
+
+
 def record_article(
     article_id: str,
     url: str,
