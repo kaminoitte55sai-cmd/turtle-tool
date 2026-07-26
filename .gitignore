@@ -19,6 +19,10 @@ master_save.pkl
 # X収集DB（ローカルのみ・Streamlit Cloud では再生成）
 x_tweets.db
 twscrape_accounts.db
+
+# 上場来高値DB（ローカルのみ・Cloud では high_history_snapshot.json から復元）
+high_history.db
+# high_history_snapshot.json は GitHub 永続化のため追跡対象
 # memo_save.json と fundamental_list.csv は GitHub 永続化のため追跡対象
 
 # ログ・一時ファイル
