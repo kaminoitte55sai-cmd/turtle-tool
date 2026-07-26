@@ -42,12 +42,14 @@ st.set_page_config(page_title="上場来高値銘柄", page_icon="📈", layout=
 
 db.init_db()
 
-# Cloud の再起動で SQLite が消えた場合、GitHub スナップショットから自動復元する
-if "high_restore_done" not in st.session_state:
-    restored = db.restore_snapshot_if_empty()
-    st.session_state["high_restore_done"] = True
-    if restored:
-        st.toast(f"スナップショットから {restored} 件復元しました")
+# スナップショットの取り込み。Cloud 再起動でのデータ消失からの復元と、
+# ローカルで取得したぶんの反映を兼ねる（株探は Cloud からのアクセスを拒否するため、
+# Cloud 側のデータはこの経路でしか増えない）。セッション毎に1回だけ実行する。
+if "high_sync_done" not in st.session_state:
+    synced = db.sync_from_snapshot()
+    st.session_state["high_sync_done"] = True
+    if synced:
+        st.toast(f"スナップショットから {synced} 件を取り込みました")
 
 
 st.title("📈 上場来高値銘柄")

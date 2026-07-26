@@ -526,31 +526,60 @@ def push_snapshot() -> bool:
         return False
 
 
-def restore_snapshot_if_empty() -> int:
-    """DB が空なら GitHub のスナップショットから復元し、復元件数を返す。
+def _load_snapshot() -> dict | None:
+    """スナップショットを読み込む。GitHub 優先、失敗したらリポジトリ内のファイル。
 
-    Cloud の再起動でローカル SQLite が消えた場合の自動リカバリ。
+    GitHub から読むのは、コンテナを再起動しなくても最新データを取り込めるようにするため。
+    ディスク上のファイルは最後にデプロイされた時点のもので、更新が反映されない。
+    """
+    token, repo = _github_conf()
+    if token:
+        try:
+            api = f"https://api.github.com/repos/{repo}/contents/{SNAPSHOT_REPO_PATH}"
+            hdrs = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+            r = requests.get(api, headers=hdrs, timeout=15)
+            if r.status_code == 200:
+                return json.loads(base64.b64decode(r.json()["content"]).decode("utf-8"))
+        except Exception:
+            pass
+
+    # フォールバック: リポジトリに同梱されているファイル
+    local = os.path.join(BASE_DIR, SNAPSHOT_REPO_PATH)
+    try:
+        if os.path.exists(local):
+            with open(local, encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return None
+
+
+def sync_from_snapshot() -> int:
+    """スナップショットの方が新しければ取り込み、追加できた件数を返す。
+
+    DB が空のときの復元だけでなく、「ローカル環境で取得 -> スナップショットを更新」
+    したぶんを Cloud 側が拾い上げる経路も兼ねる。
+    株探は Cloud からのアクセスを拒否する（HTTP 405）ため、
+    Cloud 側のデータはこの経路でしか増えない。
+
+    insert_rows は INSERT OR IGNORE なので、何度実行しても重複は増えない。
     """
     try:
+        data = _load_snapshot()
+        if not data:
+            return 0
+
         with get_conn() as conn:
-            n = conn.execute("SELECT COUNT(*) c FROM high_history").fetchone()["c"]
-        if n > 0:
+            n_local = conn.execute("SELECT COUNT(*) c FROM high_history").fetchone()["c"]
+
+        # DB が空でなく、スナップショットが古いか同時刻なら何もしない
+        snap_updated = data.get("updated_at") or ""
+        if n_local > 0 and snap_updated <= get_meta("updated_at", ""):
             return 0
 
-        token, repo = _github_conf()
-        if not token:
-            return 0
+        added = insert_rows(data.get("high_history", []))
 
-        api = f"https://api.github.com/repos/{repo}/contents/{SNAPSHOT_REPO_PATH}"
-        hdrs = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-        r = requests.get(api, headers=hdrs, timeout=15)
-        if r.status_code != 200:
-            return 0
-
-        data = json.loads(base64.b64decode(r.json()["content"]).decode("utf-8"))
-        restored = insert_rows(data.get("high_history", []))
-
-        # 記事台帳も戻す（戻さないと同じ記事を再取得してしまう）
+        # 記事台帳も取り込む（取り込まないと同じ記事を再取得しに行ってしまう）
         for a in data.get("fetched_articles", []):
             record_article(
                 a["article_id"],
@@ -560,8 +589,8 @@ def restore_snapshot_if_empty() -> int:
                 a.get("n_codes", 0),
                 a.get("status", "ok"),
             )
-        if data.get("updated_at"):
-            set_meta("updated_at", data["updated_at"])
-        return restored
+        if snap_updated:
+            set_meta("updated_at", snap_updated)
+        return added
     except Exception:
         return 0
