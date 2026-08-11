@@ -48,28 +48,68 @@ def load_selection() -> pd.DataFrame:
     return df.sort_values("published", ascending=False, ignore_index=True)
 
 
-def _download_closes(tickers: list[str], start: str, chunk: int = 40) -> pd.DataFrame:
-    """終値をまとめて取得する。銘柄数が多いので分割して負荷を抑える。"""
-    frames = []
+REQUIRED_COLS = {"code", "name", "published"}
+# 分析済みCSVかどうかの判定に使う列（これがあれば再計算せずそのまま表示できる）
+ANALYZED_MARKER = "ret"
+
+
+def read_csv(source) -> tuple[pd.DataFrame, bool]:
+    """CSV を読み込み (DataFrame, 分析済みか) を返す。
+
+    source はパスでもアップロードされたファイルオブジェクトでもよい。
+    列が足りない場合は ValueError を投げる。
+    """
+    df = pd.read_csv(source, dtype={"code": str})
+    missing = REQUIRED_COLS - set(df.columns)
+    if missing:
+        raise ValueError(
+            f"必要な列が足りません: {', '.join(sorted(missing))}"
+            f"（読み込んだ列: {', '.join(df.columns)}）"
+        )
+    df["published"] = pd.to_datetime(df["published"])
+    if "title" not in df.columns:
+        df["title"] = ""
+    df["code"] = df["code"].astype(str).str.strip()
+    analyzed = ANALYZED_MARKER in df.columns and df[ANALYZED_MARKER].notna().any()
+    return df.sort_values("published", ascending=False, ignore_index=True), analyzed
+
+
+def _download_prices(tickers: list[str], start: str, chunk: int = 40) -> dict[str, pd.DataFrame]:
+    """終値・高値・安値をまとめて取得し、種別ごとの DataFrame を返す。
+
+    期間中の最高値／最安値は日中値で見たいので、Close だけでなく High/Low も取る。
+    銘柄数が多いので分割してダウンロードする。
+    """
+    parts: dict[str, list[pd.DataFrame]] = {"Close": [], "High": [], "Low": []}
     for i in range(0, len(tickers), chunk):
-        part = tickers[i : i + chunk]
+        group = tickers[i : i + chunk]
         try:
-            data = yf.download(part, start=start, progress=False, auto_adjust=True)
+            data = yf.download(group, start=start, progress=False, auto_adjust=True)
         except Exception:
             continue
         if data is None or data.empty:
             continue
-        if isinstance(data.columns, pd.MultiIndex):
-            close = data["Close"]
-        else:  # 1銘柄だけのとき
-            close = data[["Close"]].copy()
-            close.columns = part
-        frames.append(close)
-    if not frames:
-        return pd.DataFrame()
-    px = pd.concat(frames, axis=1)
-    px.index = pd.to_datetime(px.index).tz_localize(None)
-    return px.sort_index()
+        for field in parts:
+            if isinstance(data.columns, pd.MultiIndex):
+                if field not in data.columns.get_level_values(0):
+                    continue
+                frame = data[field]
+            else:  # 1銘柄だけのとき
+                if field not in data.columns:
+                    continue
+                frame = data[[field]].copy()
+                frame.columns = group
+            parts[field].append(frame)
+
+    out: dict[str, pd.DataFrame] = {}
+    for field, frames in parts.items():
+        if not frames:
+            out[field] = pd.DataFrame()
+            continue
+        px = pd.concat(frames, axis=1)
+        px.index = pd.to_datetime(px.index).tz_localize(None)
+        out[field] = px.sort_index()
+    return out
 
 
 def analyze(df: pd.DataFrame, progress_cb=None) -> tuple[pd.DataFrame, dict]:
@@ -85,29 +125,51 @@ def analyze(df: pd.DataFrame, progress_cb=None) -> tuple[pd.DataFrame, dict]:
 
     if progress_cb:
         progress_cb(0, 2, f"{len(tickers)} 銘柄の株価を取得中…")
-    px = _download_closes(tickers, start)
+    prices = _download_prices(tickers, start)
+    px, hi, lo = prices["Close"], prices["High"], prices["Low"]
 
     if progress_cb:
         progress_cb(1, 2, "日経平均を取得中…")
-    bench = _download_closes([BENCHMARK], start)
+    bench = _download_prices([BENCHMARK], start)["Close"]
 
     rows = []
     for _, r in df.iterrows():
         t = f"{r['code']}.T"
-        rec = {**r.to_dict(), "entry_date": None, "entry": None, "now": None, "ret": None}
+        rec = {
+            **r.to_dict(),
+            "entry_date": None, "entry": None, "now": None, "ret": None,
+            "high": None, "high_date": None, "high_pct": None,
+            "low": None, "low_date": None, "low_pct": None,
+        }
 
-        if t in px.columns:
+        if not px.empty and t in px.columns:
             s = px[t].dropna()
             after = s[s.index >= r["published"].normalize()] if not s.empty else s
             if not after.empty:
                 entry = float(after.iloc[0])
                 now = float(s.iloc[-1])
+                entry_date = after.index[0]
                 rec.update(
-                    entry_date=after.index[0].date(),
+                    entry_date=entry_date.date(),
                     entry=entry,
                     now=now,
                     ret=(now / entry - 1) * 100 if entry else None,
                 )
+
+                # --- 配信後の最高値・最安値（日中値ベース）---
+                # 取得日当日を含む、entry_date 以降の全営業日から拾う。
+                for field, frame, key in (("high", hi, "max"), ("low", lo, "min")):
+                    if frame.empty or t not in frame.columns:
+                        continue
+                    v = frame[t].dropna()
+                    v = v[v.index >= entry_date]
+                    if v.empty:
+                        continue
+                    idx = v.idxmax() if key == "max" else v.idxmin()
+                    val = float(v.loc[idx])
+                    rec[field] = val
+                    rec[f"{field}_date"] = idx.date()
+                    rec[f"{field}_pct"] = (val / entry - 1) * 100 if entry else None
 
         # 同期間の日経平均騰落率（超過リターンの算出に使う）
         rec["bench_ret"] = None
@@ -135,6 +197,8 @@ def summarize(res: pd.DataFrame) -> dict:
     if ok.empty:
         return {}
     ex = ok.dropna(subset=["excess"])
+    hi = ok.dropna(subset=["high_pct"]) if "high_pct" in ok else ok.iloc[0:0]
+    lo = ok.dropna(subset=["low_pct"]) if "low_pct" in ok else ok.iloc[0:0]
     return {
         "n": len(ok),
         "n_total": len(res),
@@ -145,6 +209,9 @@ def summarize(res: pd.DataFrame) -> dict:
         "max_name": ok.loc[ok["ret"].idxmax(), "name"],
         "min": ok["ret"].min(),
         "min_name": ok.loc[ok["ret"].idxmin(), "name"],
+        # 配信後にどこまで伸びたか／どこまで沈んだか（含み益・含み損の振れ幅）
+        "high_mean": hi["high_pct"].mean() if not hi.empty else None,
+        "low_mean": lo["low_pct"].mean() if not lo.empty else None,
         "bench_mean": ex["bench_ret"].mean() if not ex.empty else None,
         "excess_mean": ex["excess"].mean() if not ex.empty else None,
         "excess_win": (ex["excess"] > 0).mean() * 100 if not ex.empty else None,

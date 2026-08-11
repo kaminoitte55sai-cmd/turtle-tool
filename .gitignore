@@ -65,3 +65,6 @@ daily_earnings_report.ps1
 # 再構築済みファイル（バックアップ）
 app_reconstructed.py
 main.py
+
+# 四季報分析の計算結果CSV（銘柄リストと同じ理由でローカル限定）
+shikiho_result.csv

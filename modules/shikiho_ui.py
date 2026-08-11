@@ -50,18 +50,42 @@ def render() -> None:
         "配信日から現在までにどれだけ動いたかを検証します。"
     )
 
-    df = shikiho.load_selection()
-    if df.empty:
-        st.warning(
-            "銘柄リスト（shikiho_selection.csv）が見つかりません。\n\n"
-            "「厳選注目株一覧」は四季報オンラインの有料プラン限定のため自動取得できません。"
-            "購読者ご自身が一覧を書き出した CSV を、リポジトリ直下に "
-            "`shikiho_selection.csv`（列: code, name, published, title）として置いてください。"
-        )
-        return
+    # --- データの読み込み: アップロード優先、なければローカルCSV ---
+    up = st.file_uploader(
+        "CSV を読み込む",
+        type=["csv"],
+        key="shk_upload",
+        help=(
+            "列: code, name, published（, title）。"
+            "騰落率などを計算済みの CSV（ret 列を含む）を入れると、株価を取得せずそのまま表示します。"
+        ),
+    )
 
-    with st.spinner("株価を取得して騰落率を計算しています…（初回は1〜2分かかります）"):
-        res, summary = _analyze_cached(df)
+    analyzed = False
+    if up is not None:
+        try:
+            df, analyzed = shikiho.read_csv(up)
+            st.caption(f"読み込み: {up.name}（{len(df)} 件{' / 計算済み' if analyzed else ''}）")
+        except Exception as e:
+            st.error(f"CSV を読み込めませんでした: {e}")
+            return
+    else:
+        df = shikiho.load_selection()
+        if df.empty:
+            st.info(
+                "銘柄リストがありません。上の「CSV を読み込む」からファイルを指定してください。\n\n"
+                "「厳選注目株一覧」は四季報オンラインの有料プラン限定のため自動取得できません。"
+                "購読者ご自身が書き出した CSV（列: code, name, published, title）をお使いください。"
+                "リポジトリ直下に `shikiho_selection.csv` を置いておけば、次回から自動で読み込まれます。"
+            )
+            return
+
+    if analyzed:
+        # 計算済みCSVはそのまま使う（株価取得を省けるので即座に表示できる）
+        res, summary = df, shikiho.summarize(df)
+    else:
+        with st.spinner("株価を取得して騰落率を計算しています…（初回は1〜2分かかります）"):
+            res, summary = _analyze_cached(df)
 
     if not summary:
         st.error("株価を取得できませんでした。時間をおいて再度お試しください。")
@@ -80,9 +104,22 @@ def render() -> None:
             delta_color="off",
         )
 
+    # 配信後にどこまで伸び、どこまで沈んだか。現在値だけでは振れ幅が見えないため併記する。
+    if summary.get("high_mean") is not None:
+        h1, h2 = st.columns(2)
+        h1.metric(
+            "配信後の最高値（平均）", _fmt_pct(summary["high_mean"]),
+            delta="配信日終値からの最大上昇", delta_color="off",
+        )
+        h2.metric(
+            "配信後の最安値（平均）", _fmt_pct(summary["low_mean"]),
+            delta="配信日終値からの最大下落", delta_color="off",
+        )
+
     st.caption(
         f"収録期間： {summary['date_from']:%Y-%m-%d} 〜 {summary['date_to']:%Y-%m-%d}　"
-        f"／ 配信日の終値で取得し、最新終値と比較（配信は寄り付き前の 06:00）"
+        f"／ 配信日の終値を取得価格とし、最新終値と比較（配信は寄り付き前の 06:00）。"
+        f"最高値・最安値は配信日以降の日中値。"
     )
 
     # ベンチマークに対する評価をはっきり出す。
@@ -121,22 +158,30 @@ def render() -> None:
             | view["name"].str.contains(s, case=False, na=False)
         ]
 
-    table = view.rename(
-        columns={
-            "published": "配信日時",
-            "code": "コード",
-            "name": "銘柄",
-            "entry": "配信時株価",
-            "now": "現在値",
-            "ret": "騰落率",
-            "bench_ret": f"{shikiho.BENCHMARK_NAME}",
-            "excess": "超過",
-            "title": "記事タイトル",
-        }
-    )[
-        ["配信日時", "コード", "銘柄", "配信時株価", "現在値", "騰落率",
-         shikiho.BENCHMARK_NAME, "超過", "記事タイトル"]
-    ].sort_values("騰落率", ascending=False, ignore_index=True)
+    rename = {
+        "published": "配信日時",
+        "code": "コード",
+        "name": "銘柄",
+        "entry": "配信時株価",
+        "now": "現在値",
+        "ret": "騰落率",
+        "high": "最高値",
+        "high_date": "最高値日",
+        "high_pct": "最大上昇",
+        "low": "最安値",
+        "low_date": "最安値日",
+        "low_pct": "最大下落",
+        "bench_ret": shikiho.BENCHMARK_NAME,
+        "excess": "超過",
+        "title": "記事タイトル",
+    }
+    cols = ["配信日時", "コード", "銘柄", "配信時株価", "現在値", "騰落率",
+            "最高値", "最大上昇", "最高値日", "最安値", "最大下落", "最安値日",
+            shikiho.BENCHMARK_NAME, "超過", "記事タイトル"]
+    table = view.rename(columns=rename)
+    table = table[[c for c in cols if c in table.columns]].sort_values(
+        "騰落率", ascending=False, ignore_index=True
+    )
 
     st.caption(f"該当 {len(table)} 銘柄（騰落率の高い順）")
     st.dataframe(
@@ -149,6 +194,14 @@ def render() -> None:
             "配信時株価": st.column_config.NumberColumn("配信時株価", format="%.1f"),
             "現在値": st.column_config.NumberColumn("現在値", format="%.1f"),
             "騰落率": st.column_config.NumberColumn("騰落率", format="%+.1f%%"),
+            "最高値": st.column_config.NumberColumn("最高値", format="%.1f"),
+            "最大上昇": st.column_config.NumberColumn(
+                "最大上昇", format="%+.1f%%", help="配信日終値から最高値までの上昇率"
+            ),
+            "最安値": st.column_config.NumberColumn("最安値", format="%.1f"),
+            "最大下落": st.column_config.NumberColumn(
+                "最大下落", format="%+.1f%%", help="配信日終値から最安値までの下落率"
+            ),
             shikiho.BENCHMARK_NAME: st.column_config.NumberColumn(
                 shikiho.BENCHMARK_NAME, format="%+.1f%%", help="同期間の指数騰落率"
             ),
@@ -167,44 +220,58 @@ def render() -> None:
 
     # --- ランキングと月次 ---
     st.divider()
-    tab_top, tab_worst, tab_month = st.tabs(["上昇率 TOP20", "下落率 WORST20", "配信月別"])
+    tab_top, tab_worst, tab_high, tab_month = st.tabs(
+        ["上昇率 TOP20", "下落率 WORST20", "最大上昇 TOP20", "配信月別"]
+    )
 
     ok = view.dropna(subset=["ret"])
 
     def _rank_table(d: pd.DataFrame) -> pd.DataFrame:
-        return d.rename(
+        out = d.rename(
             columns={
                 "published": "配信日",
                 "code": "コード",
                 "name": "銘柄",
                 "ret": "騰落率",
+                "high_pct": "最大上昇",
+                "low_pct": "最大下落",
                 "excess": "超過",
             }
-        )[["配信日", "コード", "銘柄", "騰落率", "超過"]]
+        )
+        want = ["配信日", "コード", "銘柄", "騰落率", "最大上昇", "最大下落", "超過"]
+        return out[[c for c in want if c in out.columns]]
+
+    RANK_CFG = {
+        "配信日": st.column_config.DatetimeColumn("配信日", format="YYYY-MM-DD"),
+        "騰落率": st.column_config.NumberColumn("騰落率", format="%+.1f%%"),
+        "最大上昇": st.column_config.NumberColumn("最大上昇", format="%+.1f%%"),
+        "最大下落": st.column_config.NumberColumn("最大下落", format="%+.1f%%"),
+        "超過": st.column_config.NumberColumn("超過", format="%+.1f%%"),
+    }
 
     with tab_top:
         st.dataframe(
             _rank_table(ok.nlargest(20, "ret")),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "配信日": st.column_config.DatetimeColumn("配信日", format="YYYY-MM-DD"),
-                "騰落率": st.column_config.NumberColumn("騰落率", format="%+.1f%%"),
-                "超過": st.column_config.NumberColumn("超過", format="%+.1f%%"),
-            },
+            use_container_width=True, hide_index=True, column_config=RANK_CFG,
         )
 
     with tab_worst:
         st.dataframe(
             _rank_table(ok.nsmallest(20, "ret")),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "配信日": st.column_config.DatetimeColumn("配信日", format="YYYY-MM-DD"),
-                "騰落率": st.column_config.NumberColumn("騰落率", format="%+.1f%%"),
-                "超過": st.column_config.NumberColumn("超過", format="%+.1f%%"),
-            },
+            use_container_width=True, hide_index=True, column_config=RANK_CFG,
         )
+
+    with tab_high:
+        st.caption(
+            "配信後に一時どこまで上昇したか。現在値では見えない「利益確定の機会」を確認できます。"
+        )
+        if "high_pct" in ok.columns and ok["high_pct"].notna().any():
+            st.dataframe(
+                _rank_table(ok.dropna(subset=["high_pct"]).nlargest(20, "high_pct")),
+                use_container_width=True, hide_index=True, column_config=RANK_CFG,
+            )
+        else:
+            st.info("最高値データがありません。CSV を再計算してください。")
 
     with tab_month:
         st.caption("配信月ごとの成績。相場環境の影響を切り分けるために使います。")
