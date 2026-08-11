@@ -23,6 +23,11 @@ twscrape_accounts.db
 # 上場来高値DB（ローカルのみ・Cloud では high_history_snapshot.json から復元）
 high_history.db
 # high_history_snapshot.json は GitHub 永続化のため追跡対象
+
+# 四季報「厳選注目株」の銘柄リスト（有料プラン限定コンテンツ）
+# 購読者本人の手元でのみ使う。公開リポジトリに置くと有料記事の
+# 「どの記事でどの銘柄が推奨されたか」が誰でも見られる状態になるため追跡しない。
+shikiho_selection.csv
 # memo_save.json と fundamental_list.csv は GitHub 永続化のため追跡対象
 
 # ログ・一時ファイル
