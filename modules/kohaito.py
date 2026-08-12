@@ -106,6 +106,17 @@ def refresh_prices(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
                 v = r.get(col)
                 if v is not None and not pd.isna(v):
                     out.at[i, col] = float(v) * (ratio if direction == 1 else 1 / ratio)
+
+            # PERが動いたので「1年平均との差」も引き直す。
+            # PER水準（パーセンタイル）は過去系列がないと再計算できないため、
+            # データ作成時点の値のまま据え置く。
+            avg1 = r.get("per_avg_1y")
+            new_per = out.at[i, "per"]
+            if (
+                avg1 is not None and not pd.isna(avg1) and avg1 > 0
+                and new_per is not None and not pd.isna(new_per)
+            ):
+                out.at[i, "per_vs_1y"] = (float(new_per) / float(avg1) - 1) * 100
     return out, n
 
 

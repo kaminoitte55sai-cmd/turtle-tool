@@ -87,6 +87,17 @@ def render() -> None:
             f"それ以前の銘柄は「考察」列に著者の見解を収録しています。"
         )
 
+    with st.expander("PER1年平均・2年平均・PER水準の算出方法"):
+        st.markdown(
+            "yfinance は過去のPERを持っていないため、**現在株価 ÷ 現在PER** で1株利益(EPS)を"
+            "逆算し、過去の終値に当てはめてPER系列を作っています。\n\n"
+            "- **PER1年平均 / 2年平均** … その期間のPERの平均\n"
+            "- **対1年平均** … 現在PERが1年平均から何％離れているか。マイナスなら1年平均より低い\n"
+            "- **PER水準** … 現在PERが過去2年の分布のどこにあるか（0%＝最安値圏、100%＝最高値圏）\n\n"
+            "⚠️ EPSを期間中一定とみなす近似のため、実質的には「株価が過去1〜2年のレンジのどこにあるか」"
+            "を示す指標です。増益・減益が大きかった銘柄では実際の過去PERとずれます。"
+        )
+
     if st.button("🔄 株価を更新", key="kh_refresh"):
         with st.spinner("最新の終値を取得しています…"):
             updated, n = kohaito.refresh_prices(data)
@@ -116,7 +127,17 @@ def render() -> None:
     with f4:
         q = st.text_input("コード・銘柄名", placeholder="例: 1939 / 四電工", key="kh_q")
 
+    g1, g2 = st.columns([1, 3])
+    with g1:
+        max_pctl = st.slider(
+            "PER水準の上限(%)", min_value=0, max_value=100, value=100, step=5,
+            key="kh_maxpctl",
+            help="過去2年のPER分布での位置。下げると割安圏の銘柄だけに絞れる",
+        )
+
     view = data.copy()
+    if max_pctl < 100:
+        view = view[view["per_pctl_2y"].notna() & (view["per_pctl_2y"] <= max_pctl)]
     if pick_cat:
         view = view[view["category"].isin(pick_cat)]
     if pick_judge:
@@ -153,12 +174,17 @@ def render() -> None:
             "yutai": "株主優待",
             "shareholder_return": "株主還元",
             "comment": "考察",
+            "per_avg_1y": "PER1年平均",
+            "per_avg_2y": "PER2年平均",
+            "per_vs_1y": "対1年平均",
+            "per_pctl_2y": "PER水準",
             "article_url": "記事URL",
         }
     )
-    cols = ["コード", "銘柄名", "分類", "判定", "現在株価", "PER", "PBR", "配当利回り",
-            "記事株価", "記事PER", "記事利回り", "記事日", "株主優待", "株主還元",
-            "考察", "記事URL"]
+    cols = ["コード", "銘柄名", "分類", "判定", "現在株価", "PER",
+            "PER1年平均", "PER2年平均", "対1年平均", "PER水準",
+            "PBR", "配当利回り", "記事株価", "記事PER", "記事利回り", "記事日",
+            "株主優待", "株主還元", "考察", "記事URL"]
     table = table[[c for c in cols if c in table.columns]]
 
     st.caption(f"該当 {len(table)} 銘柄（分類 → 判定 → 利回りの順）")
@@ -170,6 +196,16 @@ def render() -> None:
         column_config={
             "現在株価": st.column_config.NumberColumn("現在株価", format="%.1f"),
             "PER": st.column_config.NumberColumn("PER", format="%.1f", help="実績ベース（yfinance）"),
+            "PER1年平均": st.column_config.NumberColumn("PER1年平均", format="%.1f"),
+            "PER2年平均": st.column_config.NumberColumn("PER2年平均", format="%.1f"),
+            "対1年平均": st.column_config.NumberColumn(
+                "対1年平均", format="%+.1f%%",
+                help="現在PERが1年平均から何％離れているか。マイナスなら1年平均より低い",
+            ),
+            "PER水準": st.column_config.ProgressColumn(
+                "PER水準", format="%.0f%%", min_value=0, max_value=100,
+                help="現在PERが過去2年の分布のどこにあるか。0%=最安値圏 100%=最高値圏",
+            ),
             "PBR": st.column_config.NumberColumn("PBR", format="%.2f"),
             "配当利回り": st.column_config.NumberColumn("配当利回り", format="%.2f%%"),
             "記事株価": st.column_config.NumberColumn("記事株価", format="%.0f"),
