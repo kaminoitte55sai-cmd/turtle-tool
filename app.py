@@ -409,6 +409,10 @@ def init_state() -> None:
         st.session_state.bt_results      = None
     if "bt_raw_trades"   not in st.session_state:
         st.session_state.bt_raw_trades   = []        # 戦略比較用の生トレードリスト
+    if "bt_results_avoid" not in st.session_state:
+        st.session_state.bt_results_avoid = None     # 暴落回避シナリオの結果
+    if "bt_avoid_meta"    not in st.session_state:
+        st.session_state.bt_avoid_meta    = None     # 暴落回避シナリオの設定内容
     if "bt_ticker_input" not in st.session_state:
         st.session_state.bt_ticker_input = "7203, 9984, 6758, 8306, 9433"
     if "bt_prev_preset"  not in st.session_state:
@@ -4227,6 +4231,20 @@ def render_funda_tab() -> None:
 # バックテスト: 1銘柄シミュレーション
 # ===========================================================================
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def _bt_download(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """バックテスト用の株価取得（1時間キャッシュ）。
+
+    通常シナリオと暴落回避シナリオで同じデータを2回使うため、
+    ここでキャッシュして yfinance への往復を1回に抑える。
+    """
+    df = yf.download(ticker, start=start_date, end=end_date,
+                     progress=False, auto_adjust=True)
+    if df is not None and not df.empty and isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
+
+
 def backtest_ticker(
     ticker:            str,
     start_date:        str,
@@ -4238,6 +4256,8 @@ def backtest_ticker(
     delay_days:        int   = 0,
     vol_mult_thr:      float = 1.0,
     dd_threshold:      float = -100.0,
+    crash_avoid_date:  str | None = None,
+    crash_resume_days: int   = 3,
 ) -> tuple[list[dict], str | None]:
     """
     ドンチャンブレイクアウト + EMAクロス EXIT 戦略のバックテスト（1銘柄）。
@@ -4264,6 +4284,11 @@ def backtest_ticker(
         delay_days:        ブレイク後に待機する日数（0=即時）
         vol_mult_thr:      ブレイク日の出来高倍率閾値（例: 1.5 = 平均の1.5倍以上）
         dd_threshold:      待機期間中の最大下落率の下限（例: -3.0 = 3%超の下落はNG）
+        crash_avoid_date:  暴落回避日（YYYY-MM-DD）。指定すると
+                           「その前営業日の終値で保有ポジションを全決済し、
+                            暴落日から crash_resume_days 営業日は新規建てしない」
+                           シナリオになる。None で通常どおり。
+        crash_resume_days: 暴落日から何営業日エントリーを見送るか（0=暴落当日のみ回避）
 
     Returns:
         (trades_list, error_message)
@@ -4272,14 +4297,10 @@ def backtest_ticker(
     LOOKBACK = EXTRA  # 後方互換（スコア計算で参照）
 
     try:
-        df = yf.download(ticker, start=start_date, end=end_date,
-                         progress=False, auto_adjust=True)
+        df = _bt_download(ticker, start_date, end_date)
 
-        if df.empty:
+        if df is None or df.empty:
             return [], "データなし"
-
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
 
         # donchian + lookback + EMA 収束バッファ
         min_rows = max(donchian_days + LOOKBACK + 2, ema_slow + 10)
@@ -4316,6 +4337,18 @@ def backtest_ticker(
         dates        = df.index
         n            = len(df)
 
+        # ── 暴落回避シナリオ: 対象バーを特定 ─────────────────────────────
+        # crash_i  : 暴落当日のバー（この前日終値で撤退する）
+        # resume_i : 新規エントリーを再開できる最初のバー
+        crash_i  = -1
+        resume_i = -1
+        if crash_avoid_date:
+            _pos = int(dates.searchsorted(pd.Timestamp(crash_avoid_date), side="left"))
+            # 検証期間の初日より前 / 最終日より後 の暴落日は効果なし
+            if 0 < _pos < n:
+                crash_i  = _pos
+                resume_i = min(n, crash_i + max(0, int(crash_resume_days)))
+
         trades:     list[dict] = []
         in_trade    = False
         entry_i     = -1
@@ -4340,8 +4373,15 @@ def backtest_ticker(
                 exit_dt    = str(dates[i].date())
                 reason     = ""
 
+                # 暴落回避: 暴落の前営業日の終値で強制決済（EMA判定より優先）
+                if crash_i > 0 and i == crash_i - 1:
+                    exit_price = float(close_arr[i])
+                    exit_bar   = i
+                    exit_dt    = str(dates[i].date())
+                    reason     = "crash_avoid"
+                    exited     = True
                 # EMA(fast) < EMA(slow) → デッドクロス: 翌日始値で決済
-                if not np.isnan(ef) and not np.isnan(es) and ef < es:
+                elif not np.isnan(ef) and not np.isnan(es) and ef < es:
                     if i + 1 < n:
                         exit_price = float(open_arr[i + 1])
                         exit_bar   = i + 1
@@ -4429,6 +4469,9 @@ def backtest_ticker(
                 # ── エントリー（翌日始値） ────────────────────────────────
                 # 翌日データが存在しない場合はスキップ
                 if i + 1 >= n:
+                    continue
+                # 暴落回避: 約定バー（翌日）が回避期間に入るならエントリーしない
+                if crash_i > 0 and crash_i <= i + 1 < resume_i:
                     continue
                 in_trade    = True
                 entry_i     = i + 1                        # 実際の約定バー（翌日）
@@ -6076,6 +6119,48 @@ def render_backtest_tab() -> None:
         f"決済: EMA({ema_fast}/{ema_slow}) デッドクロス翌日始値"
     )
 
+    # ── 暴落回避シナリオ ──────────────────────────────────────────────────
+    with st.expander("💥 暴落回避シナリオ（通常結果と並べて表示）", expanded=False):
+        st.caption(
+            "指定した暴落日の**前営業日の終値で保有ポジションを全決済**し、"
+            "暴落日から指定営業日数は新規建てを見送った場合の成績を、"
+            "通常シナリオと並べて表示します。"
+        )
+        ca1, ca2, ca3 = st.columns([0.3, 0.35, 0.35])
+        with ca1:
+            bt_crash_on = st.checkbox(
+                "暴落回避シナリオを併記",
+                value=False,
+                key="bt_crash_on",
+            )
+        with ca2:
+            bt_crash_date = st.date_input(
+                "💥 暴落日",
+                value=st.session_state.get("bt_crash_date", _dt.date(2024, 8, 5)),
+                min_value=_dt_min,
+                max_value=_dt_max,
+                key="bt_crash_date",
+                help="この日の前営業日の終値で全決済する（既定: 2024年8月5日の令和のブラックマンデー）",
+            )
+        with ca3:
+            bt_crash_resume = st.number_input(
+                "🔁 見送り営業日数",
+                min_value=0, max_value=60, value=3, step=1,
+                key="bt_crash_resume",
+                help="暴落日から何営業日エントリーを見送るか（0=暴落当日のみ回避）",
+            )
+        if bt_crash_on:
+            if not (bt_start < bt_crash_date < bt_end):
+                st.warning(
+                    f"⚠️ 暴落日 {bt_crash_date} が検証期間（{bt_start} 〜 {bt_end}）の外です。"
+                    "回避シナリオは通常シナリオと同じ結果になります。"
+                )
+            else:
+                st.caption(
+                    f"📌 {bt_crash_date} の前営業日終値で全決済 → "
+                    f"{bt_crash_resume}営業日は新規建てなし → 以降は通常ロジックで再開"
+                )
+
     # ────────────────────────────────────────────────────────────────────────
     # ② 銘柄リスト（プリセット / CSV アップロード / 手動入力）
     # ────────────────────────────────────────────────────────────────────────
@@ -6162,8 +6247,10 @@ def render_backtest_tab() -> None:
         run_bt = st.button("🚀 バックテスト実行", type="primary", use_container_width=True)
     with clr_col:
         if st.button("クリア", key="bt_clear", use_container_width=True):
-            st.session_state.bt_results    = None
-            st.session_state.bt_raw_trades = []
+            st.session_state.bt_results       = None
+            st.session_state.bt_raw_trades    = []
+            st.session_state.bt_results_avoid = None
+            st.session_state.bt_avoid_meta    = None
             st.rerun()
 
     # ────────────────────────────────────────────────────────────────────────
@@ -6174,11 +6261,24 @@ def render_backtest_tab() -> None:
             st.warning("銘柄コードを入力してください。")
         else:
             tickers    = [normalize_ticker(t) for t in raw_bt]
-            all_trades: list[dict] = []
-            errors:     list[str]  = []
+            all_trades:   list[dict] = []
+            avoid_trades: list[dict] = []
+            errors:       list[str]  = []
 
             prog = st.progress(0, text=f"バックテスト開始... (0 / {len(tickers)})")
             stat = st.empty()
+
+            _common = dict(
+                start_date        = bt_start_str,
+                end_date          = bt_end_str,
+                donchian_days     = int(donchian_days),
+                ema_fast          = int(ema_fast),
+                ema_slow          = int(ema_slow),
+                use_5day_lookback = use_5day,
+                delay_days        = int(bt_delay),
+                vol_mult_thr      = float(bt_vol),
+                dd_threshold      = float(bt_dd),
+            )
 
             for idx, ticker in enumerate(tickers):
                 prog.progress(
@@ -6187,21 +6287,20 @@ def render_backtest_tab() -> None:
                 )
                 stat.caption(f"🔍 {ticker} を検証中")
 
-                trades, err = backtest_ticker(
-                    ticker            = ticker,
-                    start_date        = bt_start_str,
-                    end_date          = bt_end_str,
-                    donchian_days     = int(donchian_days),
-                    ema_fast          = int(ema_fast),
-                    ema_slow          = int(ema_slow),
-                    use_5day_lookback = use_5day,
-                    delay_days        = int(bt_delay),
-                    vol_mult_thr      = float(bt_vol),
-                    dd_threshold      = float(bt_dd),
-                )
+                trades, err = backtest_ticker(ticker=ticker, **_common)
                 all_trades.extend(trades)
                 if err:
                     errors.append(f"{ticker}: {err}")
+
+                # 暴落回避シナリオ（株価はキャッシュ済みなので再取得は発生しない）
+                if bt_crash_on:
+                    a_trades, _ = backtest_ticker(
+                        ticker            = ticker,
+                        crash_avoid_date  = str(bt_crash_date),
+                        crash_resume_days = int(bt_crash_resume),
+                        **_common,
+                    )
+                    avoid_trades.extend(a_trades)
 
             prog.progress(1.0, text=f"✅ 完了  {len(all_trades)} トレードを収集")
             stat.empty()
@@ -6210,6 +6309,16 @@ def render_backtest_tab() -> None:
             st.session_state.bt_raw_trades = all_trades
             # スコア正規化 & DataFrame 整形
             st.session_state.bt_results = normalize_bt_scores(all_trades)
+
+            if bt_crash_on:
+                st.session_state.bt_results_avoid = normalize_bt_scores(avoid_trades)
+                st.session_state.bt_avoid_meta    = {
+                    "date":        str(bt_crash_date),
+                    "resume_days": int(bt_crash_resume),
+                }
+            else:
+                st.session_state.bt_results_avoid = None
+                st.session_state.bt_avoid_meta    = None
 
             if errors:
                 with st.expander(f"⚠️ スキップされた銘柄 ({len(errors)} 件)"):
@@ -6258,6 +6367,91 @@ def render_backtest_tab() -> None:
             f"最大利益: **{returns.max():+.2f}%** ／ "
             f"最大損失: **{returns.min():+.2f}%**"
         )
+
+    # ── 暴落回避シナリオとの比較 ──────────────────────────────────────────
+    _avoid_df = st.session_state.get("bt_results_avoid")
+    _avoid_mt = st.session_state.get("bt_avoid_meta")
+    if _avoid_df is not None and _avoid_mt is not None:
+        st.divider()
+        st.markdown("### 💥 暴落回避シナリオとの比較")
+        st.caption(
+            f"**{_avoid_mt['date']}** の前営業日の終値で保有ポジションを全決済し、"
+            f"そこから **{_avoid_mt['resume_days']}営業日**は新規建てを見送った場合の成績です。"
+            "決済後は通常どおりブレイクアウトを探し直します。"
+        )
+
+        def _bt_stats(_df: pd.DataFrame) -> dict:
+            if _df is None or _df.empty or "return(%)" not in _df.columns:
+                return {}
+            r = _df["return(%)"].dropna()
+            if len(r) == 0:
+                return {}
+            h = _df["holding_days"].dropna() if "holding_days" in _df.columns else pd.Series(dtype=float)
+            return {
+                "トレード数":   float(len(r)),
+                "勝率(%)":      float((r > 0).sum() / len(r) * 100),
+                "平均リターン(%)": float(r.mean()),
+                "累積リターン(%)": float(r.sum()),
+                "最大損失(%)":  float(r.min()),
+                "平均保有日数": float(h.mean()) if len(h) else float("nan"),
+            }
+
+        _s_base  = _bt_stats(result_df)
+        _s_avoid = _bt_stats(_avoid_df)
+
+        if not _s_avoid:
+            st.info("暴落回避シナリオでは有効なトレードが発生しませんでした。")
+        else:
+            c1, c2, c3 = st.columns(3)
+            c1.metric("💹 累積リターン（通常）",   f"{_s_base['累積リターン(%)']:+.1f}%")
+            c2.metric(
+                "💹 累積リターン（暴落回避）",
+                f"{_s_avoid['累積リターン(%)']:+.1f}%",
+                delta=f"{_s_avoid['累積リターン(%)'] - _s_base['累積リターン(%)']:+.1f}pt",
+            )
+            c3.metric(
+                "📉 最大損失の改善",
+                f"{_s_avoid['最大損失(%)']:+.2f}%",
+                delta=f"{_s_avoid['最大損失(%)'] - _s_base['最大損失(%)']:+.2f}pt",
+            )
+
+            _cmp = pd.DataFrame({
+                "指標":     list(_s_base.keys()),
+                "通常":     [_s_base[k]  for k in _s_base],
+                "暴落回避": [_s_avoid.get(k, float("nan")) for k in _s_base],
+            })
+            _cmp["差分"] = _cmp["暴落回避"] - _cmp["通常"]
+            st.dataframe(
+                _cmp.style.format({"通常": "{:,.2f}", "暴落回避": "{:,.2f}", "差分": "{:+,.2f}"}),
+                use_container_width=True, hide_index=True,
+            )
+
+            # 暴落直前に強制決済されたトレード
+            if "exit_reason" in _avoid_df.columns:
+                _forced = _avoid_df[_avoid_df["exit_reason"] == "crash_avoid"]
+                if not _forced.empty:
+                    st.markdown(f"#### 🛡️ 暴落直前に撤退したトレード（{len(_forced)} 件）")
+                    _keep = [c for c in ["ティッカー", "entry_date", "entry_price",
+                                         "exit_date", "exit_price", "return(%)",
+                                         "holding_days"] if c in _forced.columns]
+                    st.dataframe(
+                        _forced[_keep].style.format(
+                            {k: v for k, v in {
+                                "entry_price": "{:,.4f}", "exit_price": "{:,.4f}",
+                                "return(%)":   "{:+.2f}%",
+                            }.items() if k in _keep}
+                        ),
+                        use_container_width=True, hide_index=True,
+                    )
+                    st.caption(
+                        "これらの銘柄が通常シナリオで暴落をまたいだ場合の成績との差が、"
+                        "回避による損益インパクトになります。"
+                    )
+                else:
+                    st.info(
+                        "指定した暴落日にポジションを保有していたトレードはありませんでした。"
+                        "トレード数の差は、回避期間中にエントリーを見送ったぶんです。"
+                    )
 
     st.divider()
 
