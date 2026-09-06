@@ -4259,7 +4259,10 @@ def _monthly_regime(
     コードの意味:
         1 = 短期 > 中期 > 長期（パーフェクトオーダー。上昇トレンド継続）
         2 = 長期 > 短期 > 中期（下降局面から短期が中期を上抜けた反転初動）
+        3 = 短期 > 長期 > 中期（短期が長期も上抜け、中期が追随待ちの回復途上）
         0 = 上記以外（取引しない）
+
+    反転局面では 2 → 3 → 1 の順に並びが変化していく。
 
     月足EMA(slow) を収束させるには数十ヶ月ぶんの月足が必要なため、
     検証開始日より (slow + 24) ヶ月ぶん遡って株価を取得して計算する。
@@ -4287,9 +4290,12 @@ def _monthly_regime(
 
     cond_a = (e_f > e_m) & (e_m > e_s)   # 短期 > 中期 > 長期
     cond_b = (e_s > e_f) & (e_f > e_m)   # 長期 > 短期 > 中期
+    cond_c = (e_f > e_s) & (e_s > e_m)   # 短期 > 長期 > 中期
     code   = pd.Series(0, index=m_close.index, dtype=int)
+    # 3条件は排他だが、念のため A を最優先で上書きする
+    code[cond_c] = 3
     code[cond_b] = 2
-    code[cond_a] = 1                      # 両立しないが念のため A を優先
+    code[cond_a] = 1
 
     # EMA(slow) が収束するまでの序盤は判定不能として 0 扱いにする
     code.iloc[: min(slow, len(code))] = 0
@@ -4313,7 +4319,7 @@ def backtest_ticker(
     mma_fast:          int   = 5,
     mma_mid:           int   = 20,
     mma_slow:          int   = 40,
-    mma_allow_reversal: bool = True,
+    mma_extra_orders:  tuple = (2, 3),
 ) -> tuple[list[dict], str | None]:
     """
     ドンチャンブレイクアウト + EMAクロス EXIT 戦略のバックテスト（1銘柄）。
@@ -4347,9 +4353,10 @@ def backtest_ticker(
         crash_resume_days: 暴落日から何営業日エントリーを見送るか（0=暴落当日のみ回避）
         monthly_ma_filter: True のとき月足EMAの並び順が条件を満たす月だけエントリーする
         mma_fast/mid/slow: 月足EMAの期間（既定 5 / 20 / 40）
-        mma_allow_reversal: True のとき「長期 > 短期 > 中期」（反転初動）も
-                           エントリー可能な並びとして扱う。
-                           False ならパーフェクトオーダー（短期 > 中期 > 長期）のみ。
+        mma_extra_orders:  パーフェクトオーダー（短期 > 中期 > 長期）に加えて
+                           エントリー可能とする並びのコード。
+                           2 = 長期 > 短期 > 中期、3 = 短期 > 長期 > 中期。
+                           空タプルならパーフェクトオーダーのみ。
 
     Returns:
         (trades_list, error_message)
@@ -4413,8 +4420,8 @@ def backtest_ticker(
         # ── 月足EMAレジームフィルター: 各日足バーの可否を事前計算 ─────────
         # 先読みを避けるため「その日が属する月の1つ前の月（＝確定済みの月足）」を参照する
         regime_arr = None
-        _ALLOWED   = {1, 2} if mma_allow_reversal else {1}
-        _REG_LABEL = {1: "短>中>長", 2: "長>短>中"}
+        _ALLOWED   = {1} | {int(x) for x in (mma_extra_orders or ())}
+        _REG_LABEL = {1: "短>中>長", 2: "長>短>中", 3: "短>長>中"}
         if monthly_ma_filter:
             _reg = _monthly_regime(ticker, start_date, end_date,
                                    int(mma_fast), int(mma_mid), int(mma_slow))
@@ -6265,13 +6272,19 @@ def render_backtest_tab() -> None:
         with mm3:
             bt_mma_s = st.number_input("月足EMA 長期", min_value=4, max_value=240,
                                        value=40, step=1, key="bt_mma_s")
-        bt_mma_rev = st.checkbox(
-            f"「長期 > 短期 > 中期」（EMA{bt_mma_s} > EMA{bt_mma_f} > EMA{bt_mma_m}）も取引可能にする",
-            value=True,
-            key="bt_mma_rev",
+        _ORDER_LABEL = {
+            2: f"長 > 短 > 中（EMA{bt_mma_s} > EMA{bt_mma_f} > EMA{bt_mma_m}）反転初動",
+            3: f"短 > 長 > 中（EMA{bt_mma_f} > EMA{bt_mma_s} > EMA{bt_mma_m}）回復途上",
+        }
+        bt_mma_extra = st.multiselect(
+            "パーフェクトオーダー（短 > 中 > 長）に加えて取引可能にする並び",
+            options=[2, 3],
+            default=[2, 3],
+            format_func=lambda x: _ORDER_LABEL[x],
+            key="bt_mma_extra",
             help=(
-                "下降局面で短期EMAが中期EMAを上抜けた反転初動の並び。"
-                "外すとパーフェクトオーダー（短期 > 中期 > 長期）のみになります。"
+                "反転局面では 長>短>中 → 短>長>中 → 短>中>長 の順に並びが変化します。"
+                "すべて外すとパーフェクトオーダーのみになります。"
             ),
         )
         if bt_mma_on:
@@ -6279,8 +6292,10 @@ def render_backtest_tab() -> None:
                 st.error("❌ 期間は 短期 < 中期 < 長期 の順で指定してください。")
             else:
                 _conds = [f"EMA{bt_mma_f} > EMA{bt_mma_m} > EMA{bt_mma_s}"]
-                if bt_mma_rev:
+                if 2 in bt_mma_extra:
                     _conds.append(f"EMA{bt_mma_s} > EMA{bt_mma_f} > EMA{bt_mma_m}")
+                if 3 in bt_mma_extra:
+                    _conds.append(f"EMA{bt_mma_f} > EMA{bt_mma_s} > EMA{bt_mma_m}")
                 st.caption(
                     "📌 月足で " + " または ".join(_conds) + " が成立している月のみ新規建て　／　"
                     f"月足EMA{bt_mma_s}の収束用に検証開始日より"
@@ -6398,15 +6413,17 @@ def render_backtest_tab() -> None:
                     crash_resume_days = int(bt_crash_resume),
                 )
             if bt_mma_on and bt_mma_f < bt_mma_m < bt_mma_s:
-                _mma_name = f"月足 {bt_mma_f}>{bt_mma_m}>{bt_mma_s}"
-                if bt_mma_rev:
-                    _mma_name += f" / {bt_mma_s}>{bt_mma_f}>{bt_mma_m}"
-                _scen_defs[_mma_name] = dict(
-                    monthly_ma_filter  = True,
+                _parts = [f"{bt_mma_f}>{bt_mma_m}>{bt_mma_s}"]
+                if 2 in bt_mma_extra:
+                    _parts.append(f"{bt_mma_s}>{bt_mma_f}>{bt_mma_m}")
+                if 3 in bt_mma_extra:
+                    _parts.append(f"{bt_mma_f}>{bt_mma_s}>{bt_mma_m}")
+                _scen_defs["月足 " + " / ".join(_parts)] = dict(
+                    monthly_ma_filter = True,
                     mma_fast = int(bt_mma_f),
                     mma_mid  = int(bt_mma_m),
                     mma_slow = int(bt_mma_s),
-                    mma_allow_reversal = bool(bt_mma_rev),
+                    mma_extra_orders = tuple(sorted(int(x) for x in bt_mma_extra)),
                 )
             _scen_trades: dict[str, list[dict]] = {k: [] for k in _scen_defs}
 
@@ -6586,9 +6603,11 @@ def render_backtest_tab() -> None:
                     "平均リターン(%)": _g.mean().values,
                     "累積リターン(%)": _g.sum().values,
                 })
-                _brk["月足レジーム"] = _brk["月足レジーム"].map(
-                    {"短>中>長": "短>中>長（順行）", "長>短>中": "長>短>中（反転初動）"}
-                ).fillna(_brk["月足レジーム"])
+                _brk["月足レジーム"] = _brk["月足レジーム"].map({
+                    "短>中>長": "短>中>長（順行）",
+                    "長>短>中": "長>短>中（反転初動）",
+                    "短>長>中": "短>長>中（回復途上）",
+                }).fillna(_brk["月足レジーム"])
                 st.markdown(f"#### 📆 月足レジーム別の内訳 — {_nm}")
                 st.dataframe(
                     _brk.style.format({
@@ -6598,8 +6617,9 @@ def render_backtest_tab() -> None:
                     use_container_width=True, hide_index=True,
                 )
                 st.caption(
-                    "「順行」は上昇トレンド継続、「反転初動」は下降局面で短期が中期を上抜けた並びです。"
-                    "どちらか一方だけが効いている場合は、上のチェックボックスで切り替えて比べてください。"
+                    "「順行」は上昇トレンド継続、「反転初動」は下降局面で短期が中期を上抜けた並び、"
+                    "「回復途上」はさらに短期が長期も上抜けて中期の追随を待っている並びです。"
+                    "特定の並びだけが効いている場合は、上の選択から外して比べてください。"
                 )
 
             # 暴落直前に強制決済されたトレード
