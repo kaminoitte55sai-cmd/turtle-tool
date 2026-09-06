@@ -4312,6 +4312,7 @@ def backtest_ticker(
     use_5day_lookback: bool  = False,
     delay_days:        int   = 0,
     vol_mult_thr:      float = 1.0,
+    vol_avg_days:      int | None = None,
     dd_threshold:      float = -100.0,
     crash_avoid_date:  str | None = None,
     crash_resume_days: int   = 3,
@@ -4345,6 +4346,7 @@ def backtest_ticker(
         use_5day_lookback: True のとき delay_days 後±5日以内のブレイクも有効
         delay_days:        ブレイク後に待機する日数（0=即時）
         vol_mult_thr:      ブレイク日の出来高倍率閾値（例: 1.5 = 平均の1.5倍以上）
+        vol_avg_days:      出来高平均を取る日数。None ならドンチャン期間と同じ
         dd_threshold:      待機期間中の最大下落率の下限（例: -3.0 = 3%超の下落はNG）
         crash_avoid_date:  暴落回避日（YYYY-MM-DD）。指定すると
                            「その前営業日の終値で保有ポジションを全決済し、
@@ -4363,6 +4365,8 @@ def backtest_ticker(
     """
     EXTRA    = 5 if use_5day_lookback else 1   # delay_days 後の追加探索幅
     LOOKBACK = EXTRA  # 後方互換（スコア計算で参照）
+    # 出来高平均の日数（未指定ならドンチャン期間と同じ＝従来動作）
+    VOL_AVG  = int(vol_avg_days) if vol_avg_days else int(donchian_days)
 
     try:
         df = _bt_download(ticker, start_date, end_date)
@@ -4370,8 +4374,8 @@ def backtest_ticker(
         if df is None or df.empty:
             return [], "データなし"
 
-        # donchian + lookback + EMA 収束バッファ
-        min_rows = max(donchian_days + LOOKBACK + 2, ema_slow + 10)
+        # donchian + lookback + EMA 収束バッファ（出来高平均期間も考慮）
+        min_rows = max(donchian_days + LOOKBACK + 2, ema_slow + 10, VOL_AVG + LOOKBACK + 2)
         if len(df) < min_rows:
             return [], f"データ不足（{len(df)}日）"
 
@@ -4379,8 +4383,8 @@ def backtest_ticker(
         # ドンチャン: shift(1) で当日を含まない前N日の高値最大
         donchian_s = df["High"].rolling(donchian_days).max().shift(1)
 
-        # 出来高移動平均（スコア用）
-        avg_vol_s  = df["Volume"].rolling(donchian_days).mean().shift(1)
+        # 出来高移動平均（フィルター判定 & スコア用）
+        avg_vol_s  = df["Volume"].rolling(VOL_AVG).mean().shift(1)
 
         # EMA クロス（決済判定）— pandas ewm を使用
         ema_fast_s = df["Close"].ewm(span=ema_fast,  adjust=False).mean()
@@ -4436,8 +4440,9 @@ def backtest_ticker(
         last_exit_i = -1   # 前回決済日（重複防止）
         entry_price = 0.0
 
-        # ループ開始: donchian / delay / EMA のデータが十分に揃う最初の日
-        start_i = max(donchian_days + delay_days + EXTRA, ema_slow + 5)
+        # ループ開始: donchian / 出来高平均 / delay / EMA のデータが十分に揃う最初の日
+        start_i = max(donchian_days + delay_days + EXTRA, ema_slow + 5,
+                      VOL_AVG + delay_days + EXTRA)
 
         for i in range(start_i, n):
 
@@ -6190,21 +6195,73 @@ def render_backtest_tab() -> None:
             help="待機期間中の最大下落率の下限（-3.0% → 3%超の下落はNG）。0日のときは無効。",
         )
     with f3:
-        bt_vol = st.slider(
-            "🔥 出来高倍率 閾値",
-            min_value=1.0, max_value=5.0, value=1.0, step=0.1,
-            format="%.1f×",
-            key="bt_vol",
-            help="ブレイク日の出来高 ÷ N日平均出来高がこの値以上の銘柄のみ通過（1.0=制限なし）",
-        )
+        _v1, _v2 = st.columns([0.62, 0.38])
+        with _v1:
+            bt_vol = st.slider(
+                "🔥 出来高倍率 閾値",
+                min_value=1.0, max_value=5.0, value=1.0, step=0.1,
+                format="%.1f×",
+                key="bt_vol",
+                help="ブレイク日の出来高 ÷ N日平均出来高がこの値以上の銘柄のみ通過（1.0=制限なし）",
+            )
+        with _v2:
+            bt_vol_days = st.number_input(
+                "📊 平均日数 N",
+                min_value=3, max_value=200, value=20, step=1,
+                key="bt_vol_days",
+                help="出来高倍率の分母にする平均出来高の日数。ドンチャン期間とは独立に設定できます。",
+            )
 
     st.caption(
         f"📌 エントリー条件: ドンチャン{donchian_days}日 ｜ "
         f"遅延{bt_delay}日 ｜ "
         f"待機DD > {'制限なし' if bt_dd == -100.0 else f'{bt_dd:.1f}%'} ｜ "
-        f"出来高 ≥ {bt_vol:.1f}×　／　"
+        f"出来高 ≥ {bt_vol:.1f}×（{bt_vol_days}日平均比）　／　"
         f"決済: EMA({ema_fast}/{ema_slow}) デッドクロス翌日始値"
     )
+
+    # ── 出来高条件の比較 ──────────────────────────────────────────────────
+    with st.expander("🔥 出来高条件の比較（通常結果と並べて表示）", expanded=False):
+        st.caption(
+            "出来高倍率の閾値と平均日数を複数選び、その組み合わせごとの成績を"
+            "通常シナリオと並べて表示します。"
+            "上で設定した出来高条件は「通常」側に適用されたままです。"
+        )
+        vs1, vs2 = st.columns(2)
+        with vs1:
+            bt_vsw_thr = st.multiselect(
+                "🔥 比較する出来高倍率",
+                options=[1.0, 1.2, 1.5, 1.8, 2.0, 2.5, 3.0, 4.0],
+                default=[1.5, 2.0, 3.0],
+                format_func=lambda x: "制限なし" if x <= 1.0 else f"{x:.1f}×",
+                key="bt_vsw_thr",
+            )
+        with vs2:
+            bt_vsw_days = st.multiselect(
+                "📊 比較する平均日数 N",
+                options=[5, 10, 20, 25, 50, 75, 100],
+                default=[20],
+                format_func=lambda x: f"{x}日",
+                key="bt_vsw_days",
+            )
+        bt_vsw_on = st.checkbox(
+            "出来高条件の比較を実行", value=False, key="bt_vsw_on",
+        )
+        _vsw_combos = [(t, d) for d in bt_vsw_days for t in bt_vsw_thr]
+        if bt_vsw_on:
+            if not _vsw_combos:
+                st.warning("⚠️ 倍率と平均日数をそれぞれ1つ以上選んでください。")
+            else:
+                st.caption(
+                    f"📌 {len(_vsw_combos)} 通りを比較します"
+                    f"（{', '.join(f'{t:.1f}×/{d}日' for t, d in _vsw_combos[:8])}"
+                    f"{' …' if len(_vsw_combos) > 8 else ''}）"
+                )
+                if len(_vsw_combos) > 12:
+                    st.warning(
+                        f"⚠️ {len(_vsw_combos)} 通りは多めです。"
+                        "銘柄数 × 組み合わせ数だけシミュレーションが走るため時間がかかります。"
+                    )
 
     # ── 暴落回避シナリオ ──────────────────────────────────────────────────
     with st.expander("💥 暴落回避シナリオ（通常結果と並べて表示）", expanded=False):
@@ -6425,6 +6482,12 @@ def render_backtest_tab() -> None:
                     mma_slow = int(bt_mma_s),
                     mma_extra_orders = tuple(sorted(int(x) for x in bt_mma_extra)),
                 )
+            if bt_vsw_on:
+                for _vt, _vd in _vsw_combos:
+                    _scen_defs[f"出来高 {_vt:.1f}× / {_vd}日平均"] = dict(
+                        vol_mult_thr = float(_vt),
+                        vol_avg_days = int(_vd),
+                    )
             _scen_trades: dict[str, list[dict]] = {k: [] for k in _scen_defs}
 
             prog = st.progress(0, text=f"バックテスト開始... (0 / {len(tickers)})")
@@ -6439,6 +6502,7 @@ def render_backtest_tab() -> None:
                 use_5day_lookback = use_5day,
                 delay_days        = int(bt_delay),
                 vol_mult_thr      = float(bt_vol),
+                vol_avg_days      = int(bt_vol_days),
                 dd_threshold      = float(bt_dd),
             )
 
@@ -6456,8 +6520,9 @@ def render_backtest_tab() -> None:
 
                 # 比較シナリオ（株価はキャッシュ済みなので再取得は発生しない）
                 for _sname, _sargs in _scen_defs.items():
+                    # _sargs が _common と同じキーを持つ場合はシナリオ側を優先する
                     _st_trades, _serr = backtest_ticker(
-                        ticker=ticker, **_common, **_sargs
+                        ticker=ticker, **{**_common, **_sargs}
                     )
                     _scen_trades[_sname].extend(_st_trades)
                     if _serr and not err:
@@ -6561,28 +6626,44 @@ def render_backtest_tab() -> None:
         if len(_live) < 2:
             st.info("比較シナリオでは有効なトレードが発生しませんでした。")
         else:
-            # 主要指標のハイライト（通常との差分つき）
-            for _nm, _sv in list(_live.items())[1:]:
-                st.markdown(f"**{_nm}**")
-                h1, h2, h3, h4 = st.columns(4)
-                h1.metric("トレード数", f"{int(_sv['トレード数'])} 件",
-                          delta=f"{int(_sv['トレード数'] - _s_base['トレード数']):+d} 件")
-                h2.metric("勝率", f"{_sv['勝率(%)']:.1f}%",
-                          delta=f"{_sv['勝率(%)'] - _s_base['勝率(%)']:+.1f}pt")
-                h3.metric("平均リターン", f"{_sv['平均リターン(%)']:+.2f}%",
-                          delta=f"{_sv['平均リターン(%)'] - _s_base['平均リターン(%)']:+.2f}pt")
-                h4.metric("最大損失", f"{_sv['最大損失(%)']:+.2f}%",
-                          delta=f"{_sv['最大損失(%)'] - _s_base['最大損失(%)']:+.2f}pt")
+            # シナリオが少ないときだけ主要指標をカードで強調する
+            if len(_live) <= 4:
+                for _nm, _sv in list(_live.items())[1:]:
+                    st.markdown(f"**{_nm}**")
+                    h1, h2, h3, h4 = st.columns(4)
+                    h1.metric("トレード数", f"{int(_sv['トレード数'])} 件",
+                              delta=f"{int(_sv['トレード数'] - _s_base['トレード数']):+d} 件")
+                    h2.metric("勝率", f"{_sv['勝率(%)']:.1f}%",
+                              delta=f"{_sv['勝率(%)'] - _s_base['勝率(%)']:+.1f}pt")
+                    h3.metric("平均リターン", f"{_sv['平均リターン(%)']:+.2f}%",
+                              delta=f"{_sv['平均リターン(%)'] - _s_base['平均リターン(%)']:+.2f}pt")
+                    h4.metric("最大損失", f"{_sv['最大損失(%)']:+.2f}%",
+                              delta=f"{_sv['最大損失(%)'] - _s_base['最大損失(%)']:+.2f}pt")
 
-            # 一覧表
-            _cmp = pd.DataFrame({"指標": list(_s_base.keys())})
+            # 一覧表（1行 = 1シナリオ）
+            _rows = []
             for _nm, _sv in _live.items():
-                _cmp[_nm] = [_sv.get(k, float("nan")) for k in _s_base]
-            for _nm in list(_live)[1:]:
-                _cmp[f"{_nm} 差分"] = _cmp[_nm] - _cmp["通常"]
-            _fmt = {c: ("{:+,.2f}" if c.endswith("差分") else "{:,.2f}")
-                    for c in _cmp.columns if c != "指標"}
-            st.dataframe(_cmp.style.format(_fmt), use_container_width=True, hide_index=True)
+                _rows.append({
+                    "シナリオ":        _nm,
+                    "トレード数":      _sv["トレード数"],
+                    "勝率(%)":         _sv["勝率(%)"],
+                    "平均リターン(%)": _sv["平均リターン(%)"],
+                    "平均リターン差":  _sv["平均リターン(%)"] - _s_base["平均リターン(%)"],
+                    "勝率差(pt)":      _sv["勝率(%)"] - _s_base["勝率(%)"],
+                    "累積リターン(%)": _sv["累積リターン(%)"],
+                    "最大損失(%)":     _sv["最大損失(%)"],
+                    "平均保有日数":    _sv["平均保有日数"],
+                })
+            _cmp = pd.DataFrame(_rows)
+            st.dataframe(
+                _cmp.style.format({
+                    "トレード数": "{:,.0f}", "勝率(%)": "{:.1f}",
+                    "平均リターン(%)": "{:+.2f}", "平均リターン差": "{:+.2f}",
+                    "勝率差(pt)": "{:+.1f}", "累積リターン(%)": "{:+.1f}",
+                    "最大損失(%)": "{:+.2f}", "平均保有日数": "{:.1f}",
+                }).background_gradient(subset=["平均リターン差"], cmap="RdYlGn"),
+                use_container_width=True, hide_index=True,
+            )
             st.caption(
                 "トレード数が減って平均リターンが上がっていれば、"
                 "そのフィルターは「負けトレードを削れている」ことになります。"
