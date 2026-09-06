@@ -756,21 +756,34 @@ def add_row() -> None:
 
 @st.cache_data(ttl=86400)
 def load_jpx_data() -> pd.DataFrame:
-    """JPX公式XLSから銘柄マスタを取得して返す（24hキャッシュ）。
+    """JPX公式の東証上場銘柄一覧から銘柄マスタを取得して返す（24hキャッシュ）。
 
-    JPXは2024年頃にCSV提供を廃止しXLS形式に変更。
-    URL: .../tvdivq0000001vg2-att/data_j.xls
+    JPXは2024年頃にCSV提供を廃止しXLS形式に変更、さらに2026年に XLSX へ移行した。
+    旧 .xls は 404 を返すため .xlsx を先に試し、旧形式へフォールバックする。
+    URL: .../tvdivq0000001vg2-att/data_j.xlsx
     カラム: 日付, コード, 銘柄名, 市場・商品区分, 33業種区分 ...
     """
     import io as _io
-    url = (
+    base = (
         "https://www.jpx.co.jp/markets/statistics-equities/misc/"
-        "tvdivq0000001vg2-att/data_j.xls"
+        "tvdivq0000001vg2-att/data_j"
     )
-    resp = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
-    resp.raise_for_status()
+    # (URL, pandas の read_excel エンジン)
+    sources = [(f"{base}.xlsx", "openpyxl"), (f"{base}.xls", "xlrd")]
 
-    df = pd.read_excel(_io.BytesIO(resp.content), engine="xlrd", dtype=str)
+    df    = None
+    fails = []
+    for url, engine in sources:
+        try:
+            resp = _req.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=20)
+            resp.raise_for_status()
+            df = pd.read_excel(_io.BytesIO(resp.content), engine=engine, dtype=str)
+            break
+        except Exception as _e:
+            fails.append(f"{url.rsplit('/', 1)[-1]}: {_e}")
+
+    if df is None:
+        raise RuntimeError("JPX銘柄一覧を取得できませんでした（" + " / ".join(fails) + "）")
 
     df = df.rename(columns={
         "コード":         "code",
@@ -898,7 +911,11 @@ def screen_ticker(
     SEARCH_WINDOW = delay_days + 8
 
     try:
-        df = yf.download(ticker, period="6mo", progress=False, auto_adjust=True)
+        # 必要な営業日数に応じて取得期間を伸ばす
+        # （6mo≒122営業日 / 1y≒245営業日）。ドンチャン100日でも不足しないようにする。
+        _need   = donchian_days + SEARCH_WINDOW + 5
+        _period = "6mo" if _need <= 100 else ("1y" if _need <= 210 else "2y")
+        df = yf.download(ticker, period=_period, progress=False, auto_adjust=True)
 
         if df.empty:
             return None, "データなし"
@@ -945,7 +962,8 @@ def screen_ticker(
                 continue
 
             entry_close = float(close_arr[entry_i])
-            if entry_close <= bo_close:
+            # delay_days == 0 は entry_i == breakout_i で同じ足の比較になるため判定しない
+            if delay_days > 0 and entry_close <= bo_close:
                 continue
 
             waiting_dd = 0.0
@@ -1965,7 +1983,7 @@ def render_screener_tab() -> None:
         with p1:
             sc_donchian = st.number_input(
                 "📅 ドンチャン期間（日）",
-                min_value=5, max_value=60, value=20, step=1,
+                min_value=5, max_value=100, value=20, step=1,
                 help="N日高値上抜けを判定する期間",
                 key="sc_donchian",
             )
@@ -4384,7 +4402,9 @@ def backtest_ticker(
                             continue   # 出来高不足
 
                     # ── 価格継続フィルター（現在バーでもブレイク水準以上） ─
-                    if close_arr[i] <= float(close_arr[j]):
+                    # lag == 0 は j == i（ブレイク当日にエントリー）なので
+                    # 自分自身との比較になり必ず不成立になる。待機がある場合のみ判定する。
+                    if lag > 0 and close_arr[i] <= float(close_arr[j]):
                         continue
 
                     # ── 待機DDフィルター（delay_days > 0 のときのみ） ────
@@ -5992,7 +6012,7 @@ def render_backtest_tab() -> None:
         with _ind_cols[0]:
             donchian_days = st.number_input(
                 "📐 ドンチャン期間（日）",
-                min_value=5, max_value=60, value=20, step=1,
+                min_value=5, max_value=100, value=20, step=1,
                 help="N日高値上抜けをエントリー条件とする日数",
             )
         with _ind_cols[1]:
@@ -6474,7 +6494,8 @@ def delayed_backtest_ticker(
                     es_e  = float(ema_slow_arr[entry_idx])
 
                     # 条件①: まだブレイク水準を上回っているか
-                    if c_e <= bo_close:
+                    # delay == 0 は entry_idx == bo_i で同じ足の比較になるため判定しない
+                    if delay > 0 and c_e <= bo_close:
                         continue
 
                     # 条件②: EMA トレンド確認（EMA fast > slow）
@@ -6608,7 +6629,7 @@ def render_time_filter_backtest() -> None:
     with cf2:
         tf_donchian = st.number_input(
             "📐 ドンチャン期間",
-            min_value=5, max_value=60, value=20, step=1,
+            min_value=5, max_value=100, value=20, step=1,
             key="tf_donchian",
         )
     with cf3:
@@ -7044,7 +7065,7 @@ def render_param_optimization() -> None:
         opt_end_str   = str(opt_end)
         opt_donchian = st.number_input(
             "📐 ドンチャン期間（固定）",
-            min_value=5, max_value=60, value=20, step=1,
+            min_value=5, max_value=100, value=20, step=1,
             key="opt_donchian",
         )
         opt_min_trades = st.number_input(
