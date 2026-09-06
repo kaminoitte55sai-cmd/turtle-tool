@@ -4254,11 +4254,16 @@ def _monthly_regime(
     mid:        int = 20,
     slow:       int = 40,
 ) -> dict:
-    """月足EMAのパーフェクトオーダー判定を {月(str): bool} で返す（1時間キャッシュ）。
+    """月足EMAの並び順を {月(str): コード} で返す（1時間キャッシュ）。
+
+    コードの意味:
+        1 = 短期 > 中期 > 長期（パーフェクトオーダー。上昇トレンド継続）
+        2 = 長期 > 短期 > 中期（下降局面から短期が中期を上抜けた反転初動）
+        0 = 上記以外（取引しない）
 
     月足EMA(slow) を収束させるには数十ヶ月ぶんの月足が必要なため、
     検証開始日より (slow + 24) ヶ月ぶん遡って株価を取得して計算する。
-    戻り値のキーは "YYYY-MM"。値は EMA(fast) > EMA(mid) > EMA(slow) が成立したか。
+    戻り値のキーは "YYYY-MM"。
     """
     ext_start = (pd.Timestamp(start_date) - pd.DateOffset(months=slow + 24)).date()
     df = yf.download(ticker, start=str(ext_start), end=end_date,
@@ -4279,11 +4284,16 @@ def _monthly_regime(
     e_f = m_close.ewm(span=fast, adjust=False).mean()
     e_m = m_close.ewm(span=mid,   adjust=False).mean()
     e_s = m_close.ewm(span=slow,  adjust=False).mean()
-    ok  = (e_f > e_m) & (e_m > e_s)
 
-    # EMA(slow) が収束するまでの序盤は判定不能として False 扱いにする
-    ok.iloc[: min(slow, len(ok))] = False
-    return {p.strftime("%Y-%m"): bool(v) for p, v in ok.items()}
+    cond_a = (e_f > e_m) & (e_m > e_s)   # 短期 > 中期 > 長期
+    cond_b = (e_s > e_f) & (e_f > e_m)   # 長期 > 短期 > 中期
+    code   = pd.Series(0, index=m_close.index, dtype=int)
+    code[cond_b] = 2
+    code[cond_a] = 1                      # 両立しないが念のため A を優先
+
+    # EMA(slow) が収束するまでの序盤は判定不能として 0 扱いにする
+    code.iloc[: min(slow, len(code))] = 0
+    return {p.strftime("%Y-%m"): int(v) for p, v in code.items()}
 
 
 def backtest_ticker(
@@ -4303,6 +4313,7 @@ def backtest_ticker(
     mma_fast:          int   = 5,
     mma_mid:           int   = 20,
     mma_slow:          int   = 40,
+    mma_allow_reversal: bool = True,
 ) -> tuple[list[dict], str | None]:
     """
     ドンチャンブレイクアウト + EMAクロス EXIT 戦略のバックテスト（1銘柄）。
@@ -4334,9 +4345,11 @@ def backtest_ticker(
                             暴落日から crash_resume_days 営業日は新規建てしない」
                            シナリオになる。None で通常どおり。
         crash_resume_days: 暴落日から何営業日エントリーを見送るか（0=暴落当日のみ回避）
-        monthly_ma_filter: True のとき月足EMAのパーフェクトオーダー
-                           （EMA(fast) > EMA(mid) > EMA(slow)）成立中のみエントリーする
+        monthly_ma_filter: True のとき月足EMAの並び順が条件を満たす月だけエントリーする
         mma_fast/mid/slow: 月足EMAの期間（既定 5 / 20 / 40）
+        mma_allow_reversal: True のとき「長期 > 短期 > 中期」（反転初動）も
+                           エントリー可能な並びとして扱う。
+                           False ならパーフェクトオーダー（短期 > 中期 > 長期）のみ。
 
     Returns:
         (trades_list, error_message)
@@ -4400,13 +4413,15 @@ def backtest_ticker(
         # ── 月足EMAレジームフィルター: 各日足バーの可否を事前計算 ─────────
         # 先読みを避けるため「その日が属する月の1つ前の月（＝確定済みの月足）」を参照する
         regime_arr = None
+        _ALLOWED   = {1, 2} if mma_allow_reversal else {1}
+        _REG_LABEL = {1: "短>中>長", 2: "長>短>中"}
         if monthly_ma_filter:
             _reg = _monthly_regime(ticker, start_date, end_date,
                                    int(mma_fast), int(mma_mid), int(mma_slow))
             if not _reg:
                 return [], "月足データ不足"
             _prev_month = (dates.to_period("M") - 1).strftime("%Y-%m")
-            regime_arr  = np.array([bool(_reg.get(p, False)) for p in _prev_month])
+            regime_arr  = np.array([int(_reg.get(p, 0)) for p in _prev_month])
 
         trades:     list[dict] = []
         in_trade    = False
@@ -4477,8 +4492,8 @@ def backtest_ticker(
             # ② ノーポジション: エントリーシグナル検索（フィルター付き）
             # ──────────────────────────────────────────────────────────────
             else:
-                # 月足EMAのパーフェクトオーダーが崩れている月は新規建てしない
-                if regime_arr is not None and not regime_arr[i]:
+                # 月足EMAの並びが条件を満たさない月は新規建てしない
+                if regime_arr is not None and int(regime_arr[i]) not in _ALLOWED:
                     continue
 
                 # delay_days 日前〜(delay_days + EXTRA - 1)日前の範囲でブレイクを探す
@@ -4577,6 +4592,8 @@ def backtest_ticker(
                     "return(%)":    None,
                     "holding_days": None,
                     "exit_reason":  None,
+                    **({"月足レジーム": _REG_LABEL.get(int(regime_arr[i]), "-")}
+                       if regime_arr is not None else {}),
                     # スコア構成要素（後で正規化）
                     "_bp":   bp,
                     "_vr":   vol_r,
@@ -4636,7 +4653,7 @@ def normalize_bt_scores(trades: list[dict]) -> pd.DataFrame:
     col_order = [
         "ティッカー", "entry_date", "exit_date",
         "entry_price", "exit_price", "return(%)",
-        "holding_days", "exit_reason", "スコア",
+        "holding_days", "exit_reason", "月足レジーム", "スコア",
     ]
     df = df[[c for c in col_order if c in df.columns]]
 
@@ -6227,8 +6244,8 @@ def render_backtest_tab() -> None:
     # ── 月足EMAレジームフィルター ─────────────────────────────────────────
     with st.expander("📆 月足EMAフィルター（通常結果と並べて表示）", expanded=False):
         st.caption(
-            "**月足**のEMAがパーフェクトオーダー（EMA5 > EMA20 > EMA40）で並んでいる期間だけ"
-            "新規建てした場合の成績を、通常シナリオと並べて表示します。"
+            "**月足**のEMAが決められた並び順になっている期間だけ新規建てした場合の成績を、"
+            "通常シナリオと並べて表示します。"
             "判定には**前月までの確定した月足**を使うので先読みは発生しません。"
             "決済ルール（日足EMAデッドクロス）は変更しません。"
         )
@@ -6248,13 +6265,24 @@ def render_backtest_tab() -> None:
         with mm3:
             bt_mma_s = st.number_input("月足EMA 長期", min_value=4, max_value=240,
                                        value=40, step=1, key="bt_mma_s")
+        bt_mma_rev = st.checkbox(
+            f"「長期 > 短期 > 中期」（EMA{bt_mma_s} > EMA{bt_mma_f} > EMA{bt_mma_m}）も取引可能にする",
+            value=True,
+            key="bt_mma_rev",
+            help=(
+                "下降局面で短期EMAが中期EMAを上抜けた反転初動の並び。"
+                "外すとパーフェクトオーダー（短期 > 中期 > 長期）のみになります。"
+            ),
+        )
         if bt_mma_on:
             if not (bt_mma_f < bt_mma_m < bt_mma_s):
                 st.error("❌ 期間は 短期 < 中期 < 長期 の順で指定してください。")
             else:
+                _conds = [f"EMA{bt_mma_f} > EMA{bt_mma_m} > EMA{bt_mma_s}"]
+                if bt_mma_rev:
+                    _conds.append(f"EMA{bt_mma_s} > EMA{bt_mma_f} > EMA{bt_mma_m}")
                 st.caption(
-                    f"📌 月足 EMA{bt_mma_f} > EMA{bt_mma_m} > EMA{bt_mma_s} が"
-                    f"成立している月のみ新規建て　／　"
+                    "📌 月足で " + " または ".join(_conds) + " が成立している月のみ新規建て　／　"
                     f"月足EMA{bt_mma_s}の収束用に検証開始日より"
                     f"{bt_mma_s + 24}ヶ月ぶん遡って株価を取得します"
                 )
@@ -6370,11 +6398,15 @@ def render_backtest_tab() -> None:
                     crash_resume_days = int(bt_crash_resume),
                 )
             if bt_mma_on and bt_mma_f < bt_mma_m < bt_mma_s:
-                _scen_defs[f"月足EMA{bt_mma_f}>{bt_mma_m}>{bt_mma_s}"] = dict(
-                    monthly_ma_filter = True,
+                _mma_name = f"月足 {bt_mma_f}>{bt_mma_m}>{bt_mma_s}"
+                if bt_mma_rev:
+                    _mma_name += f" / {bt_mma_s}>{bt_mma_f}>{bt_mma_m}"
+                _scen_defs[_mma_name] = dict(
+                    monthly_ma_filter  = True,
                     mma_fast = int(bt_mma_f),
                     mma_mid  = int(bt_mma_m),
                     mma_slow = int(bt_mma_s),
+                    mma_allow_reversal = bool(bt_mma_rev),
                 )
             _scen_trades: dict[str, list[dict]] = {k: [] for k in _scen_defs}
 
@@ -6539,6 +6571,36 @@ def render_backtest_tab() -> None:
                 "そのフィルターは「負けトレードを削れている」ことになります。"
                 "累積リターンは母数が変わるため、平均リターンと勝率を主に見てください。"
             )
+
+            # 月足レジーム別の内訳（どちらの並びが効いたか）
+            for _nm, _df in _scen.items():
+                if _df is None or _df.empty or "月足レジーム" not in _df.columns:
+                    continue
+                _g = _df.dropna(subset=["return(%)"]).groupby("月足レジーム")["return(%)"]
+                if _g.ngroups == 0:
+                    continue
+                _brk = pd.DataFrame({
+                    "月足レジーム": _g.size().index,
+                    "トレード数":   _g.size().values,
+                    "勝率(%)":      (_g.apply(lambda s: (s > 0).mean() * 100)).values,
+                    "平均リターン(%)": _g.mean().values,
+                    "累積リターン(%)": _g.sum().values,
+                })
+                _brk["月足レジーム"] = _brk["月足レジーム"].map(
+                    {"短>中>長": "短>中>長（順行）", "長>短>中": "長>短>中（反転初動）"}
+                ).fillna(_brk["月足レジーム"])
+                st.markdown(f"#### 📆 月足レジーム別の内訳 — {_nm}")
+                st.dataframe(
+                    _brk.style.format({
+                        "トレード数": "{:,.0f}", "勝率(%)": "{:.1f}",
+                        "平均リターン(%)": "{:+.2f}", "累積リターン(%)": "{:+.1f}",
+                    }),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "「順行」は上昇トレンド継続、「反転初動」は下降局面で短期が中期を上抜けた並びです。"
+                    "どちらか一方だけが効いている場合は、上のチェックボックスで切り替えて比べてください。"
+                )
 
             # 暴落直前に強制決済されたトレード
             for _nm, _df in _scen.items():
