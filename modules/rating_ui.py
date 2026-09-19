@@ -26,18 +26,34 @@ def _csv(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
 
 
-def _load(use_snapshot: bool):
-    """(DataFrame, 取得元の説明, エラー) を返す。"""
-    if use_snapshot:
-        df, updated = rating.load_snapshot()
-        if df.empty:
-            return df, None, "スナップショット（rating_snapshot.json）がありません。"
-        return df, f"スナップショット（{updated}）", None
+def _load(source: str):
+    """(DataFrame, 取得元の説明, エラー) を返す。
+
+    source: "archive"（保存済みアーカイブ）/ "live"（今の掲載ぶんだけ）
+            / "both"（アーカイブ＋今の掲載ぶんを統合。保存はしない）
+    """
+    arch, updated = rating.load_snapshot()
+
+    if source == "archive":
+        if arch.empty:
+            return arch, None, "アーカイブ（rating_snapshot.json）がありません。"
+        return arch, f"保存済みアーカイブ（最終更新 {updated}）", None
+
     try:
-        df = rating.fetch_ratings()
-        return df, "トレーダーズ・ウェブから取得", None
+        live = rating.fetch_ratings()
     except Exception as e:
+        if source == "both" and not arch.empty:
+            # 取得できなくてもアーカイブがあれば表示を続ける
+            return arch, f"取得失敗のためアーカイブのみ（最終更新 {updated}）", None
         return pd.DataFrame(), None, str(e)
+
+    if source == "live":
+        return live, "トレーダーズ・ウェブの現在の掲載ぶん", None
+
+    merged, added = rating.merge_rows(arch, live)
+    if arch.empty:
+        return merged, "トレーダーズ・ウェブから取得（アーカイブなし）", None
+    return merged, f"アーカイブ＋今回取得（未保存の新着 {added:,} 件を含む）", None
 
 
 def render() -> None:
@@ -46,38 +62,71 @@ def render() -> None:
         "トレーダーズ・ウェブの[注目レーティング]"
         f"({rating.SOURCE_URL}) から証券会社・調査機関の投資判断と目標株価を取得し、"
         "現在株価からの乖離率が高い順に並べます。"
-        "直近3週間ぶんが掲載されており、大引け後に更新されます。"
+    )
+    st.caption(
+        "⚠️ 取得元は**当月ぶん（直近3週間程度）しか掲載していません**。"
+        "月が替わると今のデータはページから消えるため、"
+        "`update_rating.bat` をローカルで定期実行して "
+        "`rating_snapshot.json` に蓄積してください（追記式なので過去分は消えません）。"
     )
 
-    # ── 取得 ──────────────────────────────────────────────────────────────
-    c1, c2, c3 = st.columns([0.22, 0.28, 0.50])
-    with c1:
-        do_fetch = st.button("🔄 レーティング取得", type="primary",
-                             use_container_width=True, key="rt_fetch")
-    with c2:
-        use_snap = st.checkbox(
-            "スナップショットから読む", value=False, key="rt_use_snap",
-            help="取得元にアクセスできない環境向け。ローカルで取得して保存した "
-                 "rating_snapshot.json を読みます。",
+    # ── アーカイブの収録状況 ──────────────────────────────────────────────
+    _arch, _arch_updated = rating.load_snapshot()
+    _cov = rating.archive_coverage(_arch)
+    if _cov:
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("📦 アーカイブ件数", f"{_cov['件数']:,} 件")
+        a2.metric("🏢 銘柄数",         f"{_cov['銘柄数']:,}")
+        a3.metric("🗓️ 収録月数",       f"{_cov['月数']} ヶ月")
+        a4.metric("📅 収録期間",       f"{_cov['最新']}", delta=f"最古 {_cov['最古']}",
+                  delta_color="off")
+        st.caption(
+            f"収録月: {', '.join(_cov['収録月'])}　／　最終更新: {_arch_updated}"
         )
-    with c3:
+    else:
+        st.warning(
+            "📦 アーカイブがまだありません。ローカルで `update_rating.bat` を"
+            "実行すると保存が始まります。"
+        )
+
+    # ── 取得 ──────────────────────────────────────────────────────────────
+    c1, c2 = st.columns([0.42, 0.58])
+    with c1:
+        source = st.radio(
+            "データ",
+            ["アーカイブ＋今の掲載ぶん", "保存済みアーカイブのみ", "今の掲載ぶんのみ"],
+            key="rt_source",
+            help="「アーカイブ＋今の掲載ぶん」は取得したデータをアーカイブと"
+                 "統合して表示します（ファイルへの保存は update_rating.bat 側で行います）。",
+        )
+    with c2:
+        do_fetch = st.button("🔄 読み込み", type="primary",
+                             use_container_width=True, key="rt_fetch")
         if st.session_state.get("rt_src"):
-            st.info(f"データ: {st.session_state['rt_src']}")
+            st.info(f"表示中: {st.session_state['rt_src']}")
+
+    _SRC_MAP = {
+        "アーカイブ＋今の掲載ぶん": "both",
+        "保存済みアーカイブのみ":   "archive",
+        "今の掲載ぶんのみ":         "live",
+    }
 
     if do_fetch:
-        with st.spinner("レーティングを取得中..."):
-            df, src, err = _load(use_snap)
+        with st.spinner("レーティングを読み込み中..."):
+            df, src, err = _load(_SRC_MAP[source])
         if err:
-            st.error(f"❌ 取得に失敗しました: {err}")
+            st.error(f"❌ 読み込みに失敗しました: {err}")
             st.caption(
                 "取得元がこの環境からのアクセスを拒否している場合は、"
-                "ローカルで `python update_rating.py` を実行して "
-                "rating_snapshot.json を更新し、上のチェックを入れてください。"
+                "ローカルで `update_rating.bat` を実行して "
+                "`rating_snapshot.json` を更新・push し、"
+                "「保存済みアーカイブのみ」を選んでください。"
             )
             return
         with st.spinner(f"現在株価を取得中...（{df['コード'].nunique()} 銘柄）"):
             prices = rating.fetch_prices(df["コード"])
-        st.session_state["rt_data"] = rating.add_upside(df, prices)
+        # アーカイブの古い行も含めて、乖離率は常に現在株価で引き直す
+        st.session_state["rt_data"] = rating.refresh_upside(df, prices)
         st.session_state["rt_src"]  = src
         st.success(
             f"✅ {len(df):,} 件（{df['コード'].nunique():,} 銘柄）／"
@@ -86,7 +135,7 @@ def render() -> None:
 
     data: pd.DataFrame | None = st.session_state.get("rt_data")
     if data is None or data.empty:
-        st.info("「レーティング取得」を押すと一覧を作成します。")
+        st.info("「読み込み」を押すと一覧を作成します。")
         return
 
     st.divider()
@@ -103,9 +152,11 @@ def render() -> None:
     f1, f2, f3, f4 = st.columns(4)
     with f1:
         days = st.selectbox(
-            "📅 対象期間", options=[3, 5, 7, 14, 30, 9999], index=5,
-            format_func=lambda x: "掲載全期間" if x > 365 else f"直近{x}日",
+            "📅 対象期間", options=[3, 5, 7, 14, 30, 60, 90, 180, 9999], index=4,
+            format_func=lambda x: "収録全期間" if x > 365 else f"直近{x}日",
             key="rt_days",
+            help="アーカイブが伸びると古い目標株価も混ざります。"
+                 "現在の株価水準と噛み合った目標だけを見るなら短めにしてください。",
         )
     with f2:
         markets = st.multiselect(
@@ -173,10 +224,11 @@ def render() -> None:
         t = d[d["乖離率(%)"].notna() & (d["乖離率(%)"] >= min_up)].copy()
         t = t.sort_values("乖離率(%)", ascending=False)
         cols = ["日付", "コード", "銘柄名", "市場", "シンクタンク", "レーティング",
-                "判定", "変更前", "目標株価", "目標変化率(%)", "現在株価", "乖離率(%)"]
+                "判定", "変更前", "目標株価", "目標変化率(%)",
+                "記録時株価", "現在株価", "乖離率(%)"]
         t = t[[c for c in cols if c in t.columns]]
-        fmt = {"現在株価": "{:,.1f}", "目標株価": "{:,.1f}", "変更前": "{:,.1f}",
-               "乖離率(%)": "{:+.1f}%", "目標変化率(%)": "{:+.1f}%"}
+        fmt = {"現在株価": "{:,.1f}", "記録時株価": "{:,.1f}", "目標株価": "{:,.1f}",
+               "変更前": "{:,.1f}", "乖離率(%)": "{:+.1f}%", "目標変化率(%)": "{:+.1f}%"}
         st.markdown(f"### 📋 乖離率ランキング（{len(t):,} 件）")
 
     if t.empty:
@@ -208,8 +260,14 @@ def render() -> None:
     with st.expander("ℹ️ 数字の読み方と注意"):
         st.markdown(
             f"""
-- **乖離率** = 目標株価 ÷ 現在株価 − 1。現在株価は Yahoo Finance の直近終値です。
-- レーティングは掲載期間内の発表をそのまま並べています。**古い目標株価ほど現在の
+- **乖離率** = 目標株価 ÷ 現在株価 − 1。現在株価は Yahoo Finance の直近終値で、
+  アーカイブの古い行もすべて**今の株価で引き直しています**。
+  「記録時株価」はアーカイブに記録した時点の株価で、参考値です。
+- 取得元は**当月ぶんしか掲載していません**。月が替わると消えるため、
+  ローカルで `update_rating.bat` を定期実行して `rating_snapshot.json` に
+  蓄積してください（追記式・重複は自動で除外）。掲載が3週間ぶんなので
+  **最低2週間に1回**走らせれば取りこぼしません。
+- レーティングは収録期間内の発表をそのまま並べています。**古い目標株価ほど現在の
   株価水準と噛み合わない**ため、対象期間を絞って見てください。
 - 「銘柄ごとに集計」では、同じ銘柄×同じシンクタンクは**最新の1件だけ**を使います。
   「最も強気な目標」を選ぶと乖離率は最大値になるので、社数と最低目標も併せて見てください。

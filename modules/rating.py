@@ -322,23 +322,108 @@ def aggregate_by_stock(df: pd.DataFrame, how: str = "max") -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# スナップショット（取得できない環境向けのフォールバック）
+# アーカイブ（掲載から落ちた分を失わないための蓄積）
 # ---------------------------------------------------------------------------
+#
+# 取得元は当月ぶん（直近3週間程度）しか載せていない。月が替わると今のデータは
+# ページから消えるため、取得のたびに上書きすると過去分が失われる。
+# そこで save_snapshot は既存ファイルとマージして追記していく。
+#
+# 1件のレーティングは「日付 × コード × シンクタンク × レーティング × 目標株価」で
+# 一意とみなす。同じ発表を取り直しても重複しない。
+#
+# 現在株価と乖離率は取得時点の値なので、アーカイブでは「記録時株価」として
+# 保存し、表示時には refresh_upside() で現在の株価から引き直す。
 
-def save_snapshot(df: pd.DataFrame, path: str = SNAPSHOT_PATH) -> None:
+KEY_COLS = ["日付", "コード", "シンクタンク", "レーティング", "目標株価", "変更前"]
+
+# レーティングそのものを表す列（アーカイブに永続保存する）
+FACT_COLS = ["日付", "コード", "銘柄名", "市場", "シンクタンク", "レーティング",
+             "判定", "目標株価", "変更前", "据え置き", "普通株"]
+
+
+def _key_frame(df: pd.DataFrame) -> pd.Series:
+    """重複判定用のキー文字列を返す。
+
+    欠損や dtype の違い（float / Arrow string など）でキーがぶれないよう、
+    列ごとに明示的に文字列へ落としてから連結する。
+    """
+    d = pd.DataFrame(index=df.index)
+    for c in KEY_COLS:
+        if c not in df.columns:
+            d[c] = ""
+        elif c == "日付":
+            d[c] = (pd.to_datetime(df[c], errors="coerce")
+                    .dt.strftime("%Y-%m-%d").fillna(""))
+        else:
+            d[c] = df[c].map(lambda x: "" if pd.isna(x) else str(x))
+    return d.agg("|".join, axis=1)
+
+
+def merge_rows(old: pd.DataFrame, new: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """既存アーカイブに新規取得ぶんを足して (統合後, 追加件数) を返す。
+
+    同じキーの行は既存側を残す（記録時株価を最初に見た値のまま保つ）。
+    """
+    if old is None or old.empty:
+        out = new.copy()
+        return out.sort_values("日付", ascending=False).reset_index(drop=True), len(out)
+    if new is None or new.empty:
+        return old.sort_values("日付", ascending=False).reset_index(drop=True), 0
+
+    old = old.copy()
+    new = new.copy()
+    have = set(_key_frame(old))
+    add  = new[~_key_frame(new).isin(have)]
+    out  = pd.concat([old, add], ignore_index=True)
+    out["日付"] = pd.to_datetime(out["日付"], errors="coerce")
+    out = out.sort_values("日付", ascending=False).reset_index(drop=True)
+    return out, len(add)
+
+
+def save_snapshot(df: pd.DataFrame, path: str = SNAPSHOT_PATH,
+                  merge: bool = True) -> tuple[int, int]:
+    """アーカイブへ保存する。(追加件数, 保存後の総件数) を返す。
+
+    merge=True なら既存ファイルと統合して追記する（既定）。
+    merge=False は df の内容で丸ごと置き換える。
+    """
     d = df.copy()
-    d["日付"] = d["日付"].dt.strftime("%Y-%m-%d")
+    # 取得時点の株価は「記録時株価」として残す（乖離率は表示時に引き直す）
+    if "現在株価" in d.columns and "記録時株価" not in d.columns:
+        d = d.rename(columns={"現在株価": "記録時株価"})
+    d = d.drop(columns=[c for c in ("乖離率(%)", "目標変化率(%)") if c in d.columns])
+    if "取得日" not in d.columns:
+        d["取得日"] = datetime.now(JST).strftime("%Y-%m-%d")
+
+    added = len(d)
+    if merge:
+        old, _ = load_snapshot(path)
+        d, added = merge_rows(old, d)
+
+    out = d.copy()
+    out["日付"] = pd.to_datetime(out["日付"], errors="coerce").dt.strftime("%Y-%m-%d")
+    # DataFrame.where では float 列の NaN が None にならず、json.dump が
+    # 標準 JSON では不正な NaN リテラルを書いてしまうため、値ごとに落とす。
+    rows = [
+        {k: (None if (v is None or (isinstance(v, float) and v != v)) else v)
+         for k, v in rec.items()}
+        for rec in out.to_dict(orient="records")
+    ]
     payload = {
         "updated_at": datetime.now(JST).isoformat(timespec="seconds"),
         "source":     SOURCE_URL,
-        "rows":       d.where(pd.notna(d), None).to_dict(orient="records"),
+        "rows":       rows,
     }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=1)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1, allow_nan=False)
+    os.replace(tmp, path)          # 書き込み中の異常終了でアーカイブを壊さない
+    return added, len(out)
 
 
 def load_snapshot(path: str = SNAPSHOT_PATH) -> tuple[pd.DataFrame, str | None]:
-    """スナップショットを (DataFrame, 更新日時) で返す。無ければ空。"""
+    """アーカイブを (DataFrame, 更新日時) で返す。無ければ空。"""
     if not os.path.exists(path):
         return pd.DataFrame(), None
     try:
@@ -347,9 +432,61 @@ def load_snapshot(path: str = SNAPSHOT_PATH) -> tuple[pd.DataFrame, str | None]:
         df = pd.DataFrame(payload.get("rows") or [])
         if not df.empty:
             df["日付"] = pd.to_datetime(df["日付"], errors="coerce")
+            df = _normalize_archive(df, payload.get("updated_at"))
+            df = df.sort_values("日付", ascending=False).reset_index(drop=True)
         return df, payload.get("updated_at")
     except Exception:
         return pd.DataFrame(), None
+
+
+def _normalize_archive(df: pd.DataFrame, updated_at: str | None) -> pd.DataFrame:
+    """旧形式（上書き保存だった頃）のアーカイブを現在の形に揃える。
+
+    ・現在株価 → 記録時株価（乖離率は表示時に引き直すので捨てる）
+    ・取得日が無ければファイルの更新日時から補う
+    冪等なので新形式に対して呼んでも変化しない。
+    """
+    d = df.copy()
+    if "現在株価" in d.columns:
+        if "記録時株価" in d.columns:
+            d["記録時株価"] = d["記録時株価"].fillna(d["現在株価"])
+            d = d.drop(columns=["現在株価"])
+        else:
+            d = d.rename(columns={"現在株価": "記録時株価"})
+    d = d.drop(columns=[c for c in ("乖離率(%)", "目標変化率(%)") if c in d.columns])
+    if "取得日" not in d.columns:
+        d["取得日"] = (updated_at or "")[:10] or None
+    return d
+
+
+def refresh_upside(df: pd.DataFrame, prices: dict[str, float]) -> pd.DataFrame:
+    """アーカイブに現在株価を当てて乖離率を引き直す。
+
+    保存済みの「記録時株価」は列として残したまま、現在株価ベースで計算する。
+    株価が取れなかった銘柄（上場廃止など）は現在株価・乖離率が空になる。
+    記録時株価で代用はしない（値の出どころが混ざると解釈できなくなるため）。
+    """
+    d = df.copy()
+    if "現在株価" in d.columns and "記録時株価" not in d.columns:
+        d = d.rename(columns={"現在株価": "記録時株価"})
+    d = d.drop(columns=[c for c in ("現在株価",) if c in d.columns])
+    return add_upside(d, prices)
+
+
+def archive_coverage(df: pd.DataFrame) -> dict:
+    """アーカイブの収録状況を返す（画面表示用）。"""
+    if df is None or df.empty:
+        return {}
+    dt = pd.to_datetime(df["日付"], errors="coerce").dropna()
+    months = sorted(dt.dt.strftime("%Y-%m").unique())
+    return {
+        "件数":       len(df),
+        "銘柄数":     int(df["コード"].nunique()),
+        "最古":       (dt.min().date().isoformat() if len(dt) else None),
+        "最新":       (dt.max().date().isoformat() if len(dt) else None),
+        "収録月":     months,
+        "月数":       len(months),
+    }
 
 
 def fetch_ratings() -> pd.DataFrame:
