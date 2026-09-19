@@ -7939,11 +7939,13 @@ def main() -> None:
     </style>
     """, unsafe_allow_html=True)
 
-    tab1, tab_high, tab_shk, tab_kh, tab2, tab3, tab4, tab5 = st.tabs([
+    (tab1, tab_high, tab_shk, tab_kh, tab_rt,
+     tab2, tab3, tab4, tab5) = st.tabs([
         "🔍 スクリーニング",
         "📈 上場来高値",
         "📗 四季報銘柄分析",
         "💰 高配当株PF",
+        "⭐ レーティング",
         "👀 監視銘柄",
         "💼 ポジション管理",
         "📈 バックテスト",
@@ -7967,6 +7969,11 @@ def main() -> None:
         from modules import kohaito_ui
 
         kohaito_ui.render()
+
+    with tab_rt:
+        from modules import rating_ui
+
+        rating_ui.render()
 
     with tab2:
         render_funda_tab()
