@@ -56,8 +56,6 @@ env/
 # Windows固有
 Thumbs.db
 Desktop.ini
-daily_earnings_report.bat
-daily_earnings_report.ps1
 
 # MacOS
 .DS_Store
